@@ -29,15 +29,10 @@ backend/data/models/
 backend/data/*.db-wal
 backend/data/*.db-shm
 
-# 索引与模型体积较大但部署需要：
-# stardewpal.db（约 20MB）与 model_quantized.onnx（23MB）
-# 若要提交，用 Git LFS；否则在部署时由 prepare_data 重建
+# 索引体积较大，部署时用 prepare_data 重建
 backend/data/stardewpal.db
 
 # 系统
 .DS_Store
 Thumbs.db
 *.log
-
-# CI ��Ҫ workflow scope �������ͣ����� gh auth refresh ��Ȩ��������
-# .github/
