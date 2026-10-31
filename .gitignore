@@ -38,3 +38,6 @@ backend/data/stardewpal.db
 .DS_Store
 Thumbs.db
 *.log
+
+# CI 需要 workflow scope 才能推送，先用 gh auth refresh 授权后再启用
+# .github/
