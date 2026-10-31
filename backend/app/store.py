@@ -286,11 +286,21 @@ class Store:
         return d
 
     def list_items(self) -> list[dict[str, Any]]:
-        rows = self.conn.execute("SELECT * FROM items").fetchall()
+        """返回全部物品，附带所属文档的 wiki 分类（用于判断水果/蔬菜）。"""
+        rows = self.conn.execute(
+            """SELECT i.*, d.categories AS doc_categories
+               FROM items i
+               LEFT JOIN docs d ON d.title = i.doc_title"""
+        ).fetchall()
         out = []
         for r in rows:
             d = dict(r)
             d["fields"] = json.loads(d.get("fields") or "{}")
+            raw_cats = d.pop("doc_categories", None)
+            try:
+                d["categories"] = json.loads(raw_cats) if raw_cats else []
+            except (json.JSONDecodeError, TypeError):
+                d["categories"] = []
             out.append(d)
         return out
 

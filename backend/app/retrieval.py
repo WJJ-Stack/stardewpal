@@ -233,7 +233,7 @@ def extract_entities(query: str) -> list[str]:
         # 去掉开头残留的疑问词
         s = re.sub(r'^[的是在里]', '', s).strip()
         s = s.strip('？?。，,！!　 ')
-        if s and len(s) >= 2:
+        if s:
             out.append(s)
 
     # 去重保序

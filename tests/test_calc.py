@@ -27,6 +27,22 @@ class TestSellPrice:
         # 35 × 3.0 = 105
         assert sell_price(35, artisan='果酒').value == 105
 
+    def test_pickles_has_flat_bonus(self):
+        """腌菜 = 蔬菜基础价 × 2 + 50（wiki 原文）。
+
+        这是真实 bug：最初实现漏了 +50，导致所有腌菜题标准答案偏低。
+        """
+        assert sell_price(35, artisan='腌菜').value == 120  # 35*2+50
+        assert sell_price(100, artisan='腌菜').value == 250
+
+    def test_jelly_has_flat_bonus(self):
+        """果酱 = 水果基础价 × 2 + 50。"""
+        assert sell_price(80, artisan='果酱').value == 210  # 80*2+50
+
+    def test_juice_multiplier(self):
+        """果汁 = 蔬菜基础价 × 2.25。"""
+        assert sell_price(50, artisan='果汁').value == 112  # 112.5 floor
+
     def test_artisan_exempt_from_quality(self):
         """果酒不吃品质加成——这是 wiki 明确规则，也是最容易算错的地方。"""
         base = sell_price(35, '金星', artisan='果酒')
@@ -38,6 +54,11 @@ class TestSellPrice:
         # 35 × 3.0 × 1.4 = 147
         assert sell_price(35, profession='工匠', artisan='果酒').value == 147
 
+    def test_profession_applies_after_bonus(self):
+        """工匠技能应在固定加成之后乘。"""
+        # (35*2+50) * 1.4 = 168
+        assert sell_price(35, profession='工匠', artisan='腌菜').value == 168
+
     def test_unknown_artisan_raises(self):
         with pytest.raises(ValueError):
             sell_price(35, artisan='不存在的加工')
@@ -45,6 +66,10 @@ class TestSellPrice:
     def test_formula_recorded(self):
         r = sell_price(100, '金星')
         assert '1.5' in r.formula
+
+    def test_formula_shows_bonus(self):
+        r = sell_price(35, artisan='腌菜')
+        assert '+ 50' in r.formula
 
 
 class TestRegrow:

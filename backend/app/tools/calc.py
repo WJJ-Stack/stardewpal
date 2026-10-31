@@ -28,17 +28,31 @@ QUALITY_MULTIPLIER: dict[str, float] = {
 }
 
 # 工匠物品倍率（wiki: 工匠物品）
-# 注意：果酒/果汁等以「基础卖价 × 倍率」计，且部分物品不受品质影响
+# 注意：果酒/果汁为纯倍率，腌菜/果酱为「倍率 + 固定加成」
 ARTISAN_MULTIPLIER: dict[str, float] = {
-    '果酒': 3.0,
-    '果汁': 2.25,
-    '腌菜': 2.0,
-    '果酱': 2.0,
+    '果酒': 3.0,        # 水果基础价 × 3
+    '果汁': 2.25,       # 蔬菜基础价 × 2.25
+    '腌菜': 2.0,        # 蔬菜基础价 × 2 + 50
+    '果酱': 2.0,        # 水果基础价 × 2 + 50
     '蜂蜜酒': 3.0,
     '啤酒': 3.0,
     '奶酪': 2.0,
     '蛋黄酱': 2.0,
     '布料': 1.0,
+}
+
+# 加工后的固定加成（wiki 明确写在该物品的卖价栏里）
+ARTISAN_FLAT_BONUS: dict[str, float] = {
+    '腌菜': 50,
+    '果酱': 50,
+}
+
+# 各加工方式的原料类别（用于校验问题是否合理）
+ARTISAN_INPUT_KIND: dict[str, str] = {
+    '果酒': '水果',
+    '果酱': '水果',
+    '果汁': '蔬菜',
+    '腌菜': '蔬菜',
 }
 
 # 不受品质加成的工匠物品（wiki 明确：果酒、果汁、腌菜等固定不吃品质）
@@ -83,6 +97,13 @@ def sell_price(base: float, quality: str = '普通', profession: str = '无',
             raise ValueError(f'未知加工方式：{artisan}，可选：{list(ARTISAN_MULTIPLIER)}')
         value *= a_mult
         steps.append(f'加工为{artisan}：×{a_mult}　→ {_fmt(value)}')
+
+        # 腌菜/果酱有固定加成（wiki: 蔬菜基础价 × 2 + 50）
+        bonus = ARTISAN_FLAT_BONUS.get(artisan, 0)
+        if bonus:
+            value += bonus
+            steps.append(f'{artisan}固定加成：+{_fmt(bonus)}　→ {_fmt(value)}')
+
         if profession != '无' and artisan in {'果酒', '果汁', '腌菜', '果酱', '蜂蜜酒'}:
             value *= p_mult
             steps.append(f'{profession}技能：×{p_mult}　→ {_fmt(value)}')
@@ -101,6 +122,9 @@ def sell_price(base: float, quality: str = '普通', profession: str = '无',
     formula = f'{_fmt(base)}'
     if artisan:
         formula += f' × {ARTISAN_MULTIPLIER[artisan]}'
+        bonus = ARTISAN_FLAT_BONUS.get(artisan, 0)
+        if bonus:
+            formula += f' + {_fmt(bonus)}'
     if quality != '普通' and (not artisan or artisan not in QUALITY_EXEMPT):
         formula += f' × {QUALITY_MULTIPLIER[quality]}'
 

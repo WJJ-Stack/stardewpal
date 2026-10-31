@@ -99,6 +99,15 @@ class Agent:
 
     # ---------------------------------------------------------------- 路由
     async def _route(self, question: str, trace: Trace) -> dict[str, Any]:
+        # 硬拦截：问题明确指向其他作品时，无论模型怎么判断都强制检索，
+        # 由后续相关性门控触发拒答。
+        # 原因：模型对《原神》《我的世界》等热门内容有训练记忆，
+        # 会绕过知识库直接凭记忆作答，而这类回答无法核实、也超出本项目范围。
+        if _mentions_other_domain(question):
+            trace.add('route_forced_retrieval', reason='问题涉及本知识库范围外的作品')
+            return {'need_retrieval': True, 'reason': '跨域问题强制走检索+门控',
+                    'query': question}
+
         try:
             res = await self.llm.chat(
                 [{'role': 'system', 'content': ROUTER_SYSTEM},
@@ -424,7 +433,13 @@ def _is_relevant(question: str, chunk: Retrieved) -> bool:
 
     # ---- 防线 2：任一实体在标题中占主导地位
     for ent in entities:
-        if len(ent) < 2 or ent not in t:
+        if not ent or ent not in t:
+            continue
+        # 单字实体（「蒜」「蛋」「鱼」）只在标题完全等于实体时放行，
+        # 否则会被「蒜油」「鱼饵」大量误命中；但也必须能命中真正的单字条目
+        if len(ent) == 1:
+            if t == ent:
+                return True
             continue
         # 「胡桃木茶几」里「胡桃」只是构词前缀
         if len(t) > len(ent) + 1 and not _is_entity_suffix_ok(t, ent):
@@ -437,7 +452,13 @@ def _is_relevant(question: str, chunk: Retrieved) -> bool:
         if len(ent) >= 2 and ent in text:
             return True
 
-    # ---- 防线 4：无实体命中 → 只有非常高的分数才放行
+    # ---- 防线 4：单字实体问题放宽（如「蒜几天成熟」）
+    if any(len(e) == 1 for e in entities):
+        for ent in entities:
+            if len(ent) == 1 and ent in t:
+                return True
+
+    # ---- 防线 5：无实体命中 → 只有非常高的分数才放行
     return chunk.score > 0.055
 
 

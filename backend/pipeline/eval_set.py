@@ -92,15 +92,47 @@ def generate(store: Store, per_type: int = 40, seed: int = 42) -> list[EvalCase]
     NOT_QUALITY = {'武器', '匕首', '剑', '工具', '戒指', '鞋子', '鱼', '传奇鱼',
                    '种子', '原料', '可制作物品'}
 
+    # 只有「可直接加工/可带品质」的作物才适用倍率计算。
+    # 树苗、种子、非食材必须排除，否则会生成错误标准答案
+    # （真实模型评测中模型的反驳是对的，说明词表判断不可靠）。
+    NON_ARTISAN = ('树苗', '种子', '苗', '斧', '锤', '剑', '刀', '弓', '杖',
+                   '戒指', '鞋', '工具', '镐', '锄', '帽', '衣', '裤')
+    # wiki 明确排除在果汁/果酒原料外的作物
+    JUICE_EXCLUDED = ('小麦', '啤酒花', '茶叶')
+    # wiki 明确说明「既非水果也非蔬菜，不能放入工匠设备」的例外
+    ARTISAN_FORBIDDEN = ('宝石甜莓', '齐瓜', '茶树叶', '咖啡豆', '仙人掌果子')
+
     def is_crop_like(it: dict) -> bool:
+        """可作为品质/加工计算对象：有生长周期、非工具/种子/武器。"""
+        name = str(it.get('name_zh') or '')
         title = str(it.get('doc_title') or '')
-        if any(x in title for x in ('种子', '剑', '刀', '杖', '弓', '戒指', '鞋', '工具')):
+        if any(x in name or x in title for x in NON_ARTISAN):
             return False
         t = str(it['fields'].get('type') or it['fields'].get('类型') or '')
         if t in NOT_QUALITY:
             return False
-        grow = it['fields'].get('growth') or it['fields'].get('生长时间')
-        return grow is not None
+        return (it['fields'].get('growth') or it['fields'].get('生长时间')) is not None
+
+    def artisan_kind_ok(it: dict, artisan: str) -> bool:
+        """加工方式与原料类型是否匹配（严格模式）。
+
+        只认 wiki 分类，分类缺失或不明确就跳过该题。
+        理由：靠名称猜会生成错误标准答案——实测中模型的反驳
+        比我的词表更准确（如「苋菜不能做果汁」「茶叶不能腌」）。
+        宁可少几道题，也不要错的标准答案。
+        """
+        name = str(it.get('name_zh') or '')
+        if name in ARTISAN_FORBIDDEN:
+            return False
+        if artisan in ('果酒', '果汁') and any(w in name for w in JUICE_EXCLUDED):
+            return False
+
+        cats = set(it.get('categories') or [])
+        if artisan in ('果酒', '果汁'):
+            return '水果' in cats
+        if artisan in ('腌菜', '果酱'):
+            return '蔬菜' in cats
+        return False
 
     priced = [it for it in items if price_of(it) is not None]
     crop_like = [it for it in priced if is_crop_like(it)]
@@ -135,16 +167,26 @@ def generate(store: Store, per_type: int = 40, seed: int = 42) -> list[EvalCase]
             expected=f'{int(val)} 金', kind='quality', numeric=float(val),
             source=it.get('doc_title') or name))
 
-    # ---- 3. 加工计算（仅限作物类）
-    for it in crop_like[per_type:per_type * 2]:
-        base = price_of(it)
+    # ---- 3. 加工计算（仅限原料类型匹配的作物）
+    artisan_cases = 0
+    for it in crop_like[per_type:]:
+        if artisan_cases >= per_type:
+            break
         name = it.get('name_zh') or it.get('key')
-        a = rng.choice(ARTISAN_CASES)
+        base = price_of(it)
+        if base is None:
+            continue
+        # 逐个尝试匹配的加工方式
+        matched = [a for a in ARTISAN_CASES if artisan_kind_ok(it, a)]
+        if not matched:
+            continue
+        a = rng.choice(matched)
         try:
             val = sell_price(base, '普通', artisan=a).value
         except Exception:
             continue
         n += 1
+        artisan_cases += 1
         cases.append(EvalCase(
             id=f'art-{n:03d}', question=f'{name}做成{a}能卖多少钱？',
             expected=f'{int(val)} 金', kind='artisan', numeric=float(val),
@@ -260,10 +302,21 @@ def _close(got: float, exp: float) -> bool:
 
 
 def _has_invented_number(text: str) -> bool:
-    """粗判：出现 2 位以上数字但含拒答词，视为编造。"""
+    """粗判：拒答时是否编造了具体数值。
+
+    要点：引用编号（[1]、[1–17]、[1][2]）不是编造，
+    必须先剔除再检查。这是评测中发现的评分 bug——
+    模型正确拒答并标注引用，却被误判为"编造数值"。
+    """
     if not any(m in text for m in REFUSAL_MARKERS):
         return False
-    nums = [n for n in RE_NUM_IN_TEXT.findall(text) if len(n.replace(',', '')) >= 2]
+    # 剔除引用角标：[1] [1,2] [1–17] [1][2]
+    cleaned = re.sub(r'\[\s*\d+(?:\s*[,，\-–~]\s*\d+)*\s*\]', ' ', text)
+    # 剔除常见倍率/百分比表达（不是"编造的价格"）
+    cleaned = re.sub(r'\d+(?:\.\d+)?\s*[%％倍]', ' ', cleaned)
+    # 剩下的才是真正的事实性数字
+    nums = [n for n in RE_NUM_IN_TEXT.findall(cleaned)
+            if len(n.replace(',', '').replace('.', '')) >= 2]
     return len(nums) > 0
 
 
