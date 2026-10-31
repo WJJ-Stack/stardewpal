@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# 环境变量（含密钥，绝不入库）
+.env
+.env.local
+
+# 探测脚本产物
+corpus_probe/
+tools/probe_*.py
+tools/diagnose_*.py
+tools/smoke_*.py
+tools/make_montage.py
+
+# 数据
+backend/data/raw/*.jsonl
+backend/data/raw/*.json
+backend/data/runs/
+backend/data/eval/
+backend/data/icons/*
+!backend/data/icons/.gitkeep
+backend/data/models/
+backend/data/*.db-wal
+backend/data/*.db-shm
+
+# 索引与模型体积较大但部署需要：
+# stardewpal.db（约 20MB）与 model_quantized.onnx（23MB）
+# 若要提交，用 Git LFS；否则在部署时由 prepare_data 重建
+backend/data/stardewpal.db
+
+# 系统
+.DS_Store
+Thumbs.db
+*.log

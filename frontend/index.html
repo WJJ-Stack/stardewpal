@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StardewPal · 星露谷智能问答</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">🌾</span>
+    <div>
+      <h1>StardewPal</h1>
+      <p class="sub">星露谷物语 · 截图问答助手</p>
+    </div>
+  </div>
+  <div class="status" id="status">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">连接中…</span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="chat-panel">
+    <div class="messages" id="messages">
+      <div class="msg assistant">
+        <div class="bubble">
+          <p>你好！我是星露谷助手。你可以：</p>
+          <ul>
+            <li>直接提问，例如「杨桃要几天成熟」「金星蓝莓卖多少钱」</li>
+            <li>上传游戏截图，我会识别界面并回答</li>
+          </ul>
+          <p class="hint">回答基于 BWiki 知识库，数值会标注来源。</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="preview" id="preview" hidden>
+        <img id="previewImg" alt="截图预览" />
+        <button class="remove" id="removeImg" title="移除">×</button>
+      </div>
+      <div class="input-row">
+        <label class="upload" title="上传截图">
+          <input type="file" id="fileInput" accept="image/*" hidden />
+          <span>🖼</span>
+        </label>
+        <textarea id="input" rows="1" placeholder="问点什么…（Shift+Enter 换行）"></textarea>
+        <button id="send" class="send">发送</button>
+      </div>
+      <div class="quick">
+        <button data-q="杨桃要几天成熟">杨桃几天成熟</button>
+        <button data-q="金星蓝莓卖多少钱">金星蓝莓卖多少</button>
+        <button data-q="防风草做成腌菜卖多少">防风草做腌菜</button>
+        <button data-q="春季种什么最赚钱">春季种什么</button>
+      </div>
+    </div>
+  </section>
+
+  <aside class="side-panel">
+    <div class="card">
+      <h2>知识库</h2>
+      <dl id="meta">
+        <div><dt>文档</dt><dd id="mDocs">—</dd></div>
+        <div><dt>文本块</dt><dd id="mChunks">—</dd></div>
+        <div><dt>物品</dt><dd id="mItems">—</dd></div>
+        <div><dt>图标</dt><dd id="mIcons">—</dd></div>
+      </dl>
+    </div>
+
+    <div class="card" id="visionCard" hidden>
+      <h2>截图识别</h2>
+      <div id="visionBody"></div>
+    </div>
+
+    <div class="card" id="traceCard" hidden>
+      <h2>检索过程</h2>
+      <div id="traceBody"></div>
+    </div>
+
+    <div class="card" id="citeCard" hidden>
+      <h2>引用来源</h2>
+      <div id="citeBody"></div>
+    </div>
+
+    <div class="card notice">
+      <p>内容来自 <a href="https://wiki.biligame.com/stardewvalley/" target="_blank" rel="noopener">BWiki 星露谷物语</a>，
+      遵循 CC BY-NC-SA。本项目仅用于学习与技术展示，非商用。</p>
+    </div>
+  </aside>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
