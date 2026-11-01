@@ -13,7 +13,8 @@ venv/
 !.env.example
 *.bak
 
-# 探测脚本产物
+# 一次性探测脚本归档（保留本地，不入库）
+.archive/
 corpus_probe/
 tools/probe_*.py
 tools/diagnose_*.py
