@@ -1,0 +1,22 @@
+# 构建上下文排除项：减小上传体积、避免泄露
+.git/
+.github/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.archive/
+corpus_probe/
+tools/
+
+# 本地密钥绝不进镜像
+.env
+.env.*
+!.env.example
+
+# 运行时产物
+backend/data/runs/
+backend/data/eval/
+*.log

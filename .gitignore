@@ -21,19 +21,23 @@ tools/diagnose_*.py
 tools/smoke_*.py
 tools/make_montage.py
 
-# 数据
-backend/data/raw/*.jsonl
-backend/data/raw/*.json
+# 运行时产物（评测结果、临时文件）
 backend/data/runs/
 backend/data/eval/
-backend/data/icons/*
-!backend/data/icons/.gitkeep
-backend/data/models/
 backend/data/*.db-wal
 backend/data/*.db-shm
 
-# 索引体积较大，部署时用 prepare_data 重建
-backend/data/stardewpal.db
+# 图标库打包成单个 zip 入库（icons.zip），运行时解包；
+# 散落的 1200 个 PNG 不入库，避免仓库臃肿
+backend/data/icons/*
+!backend/data/icons/.gitkeep
+
+# 注意：以下数据**需要**入库，以便部署时秒级启动（合计约 27MB，远低于魔搭 100MB 限制）
+#   backend/data/stardewpal.db        检索索引（19.5MB）
+#   backend/data/models/              嵌入模型（22.9MB）
+#   backend/data/icons.zip            物品图标（1200 个，1.0MB）
+#   backend/data/raw/pages.jsonl      清洗后的语料（3.6MB，便于复现）
+#   backend/data/raw/icons.json       图标元数据
 
 # 系统
 .DS_Store

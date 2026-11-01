@@ -27,13 +27,18 @@ COPY backend ./backend
 COPY frontend ./frontend
 COPY scripts ./scripts
 
-# 数据（索引与图标在构建期预生成，避免容器启动时现建索引）
+# 数据（索引与模型预生成，图标以 zip 形式携带，启动时解包）
 COPY backend/data ./backend/data
+
+# 构建期解包图标，避免每次启动都解压
+RUN python -m backend.pipeline.bundle_assets --unpack
 
 ENV PYTHONPATH=/app
 EXPOSE 7860
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD curl -fsS http://127.0.0.1:7860/health || exit 1
 
+# 单 worker：SQLite 写入与模型加载都是进程级的，
+# 多 worker 会各自加载 23MB 模型，在 CPU 上得不偿失
 CMD ["python", "-m", "backend.app.serve", "--host", "0.0.0.0", "--port", "7860"]
