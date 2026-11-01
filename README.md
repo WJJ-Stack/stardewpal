@@ -118,11 +118,37 @@ python -m backend.app.serve
 # 打开 http://127.0.0.1:7860
 ```
 
+### 选择模型服务
+
+支持多家 OpenAI 兼容服务，改 `LLM_PROVIDER` 即可切换，无需改代码：
+
+| provider | 控制台 | 免费额度 |
+|---|---|---|
+| `zhipu` | [open.bigmodel.cn](https://open.bigmodel.cn/) | `glm-4-flash` 长期免费 |
+| `modelscope` | [modelscope.cn](https://modelscope.cn/) | 绑定阿里云后每日免费 |
+| `siliconflow` | [cloud.siliconflow.cn](https://cloud.siliconflow.cn/) | 注册送额度 |
+| `qwen` | [百炼](https://bailian.console.aliyun.com/) | 新用户 100 万 token |
+| `mock` | — | 完全离线，不消耗额度 |
+
+```bash
+# 自检当前配置
+python -m backend.pipeline.check_llm
+
+# 测试所有已知 provider 的连通性
+python -m backend.pipeline.check_llm --all
+```
+
+未配置 key 或额度耗尽时，系统自动降级：仍返回检索结果与计算结果并标注引用，
+只是自然语言组织退化。这一点在 `METRICS.md` 有说明。
+
 ### 评测
 
 ```bash
-python -m backend.pipeline.run_eval --limit 60
-python -m backend.pipeline.run_eval --no-agent    # 消融：关闭多轮决策
+python -m backend.pipeline.run_eval --per-type 30      # 完整链路
+python -m backend.pipeline.run_eval --per-type 30 --no-agent   # 消融对照
+
+# 不消耗额度的可复现基线
+LLM_PROVIDER=mock python -m backend.pipeline.run_eval --per-type 30 --regenerate
 ```
 
 ---

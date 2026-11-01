@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 
-from backend.app.config import settings
+from backend.app.config import resolve_provider, settings
 
 
 @dataclass
@@ -32,17 +32,36 @@ class LLMError(RuntimeError):
 
 
 class LLMClient:
+    """OpenAI 兼容客户端，支持多 provider 切换。
+
+    通过 LLM_PROVIDER 环境变量选择服务商：
+        qwen / zhipu / modelscope / siliconflow / mock
+
+    未配置 API Key 时自动进入 mock 模式，返回确定性响应（标记 mocked=True），
+    使整条链路在无网络、无额度的情况下仍可被评测与 CI 验证。
+    """
+
     def __init__(self) -> None:
-        self.base_url = settings.llm_base_url.rstrip('/')
-        self.api_key = settings.dashscope_api_key
-        self.model = settings.llm_model
-        self.vlm_model = settings.vlm_model
+        cfg = resolve_provider()
+        self.provider = cfg['name']
+        self.base_url = cfg['base_url']
+        self.api_key = cfg['api_key']
+        self.model = cfg['model']
+        self.vlm_model = cfg['vlm_model']
         self.timeout = settings.llm_timeout
-        self.provider = settings.llm_provider
 
     @property
     def live(self) -> bool:
         return bool(self.api_key) and self.provider != 'mock'
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'provider': self.provider,
+            'model': self.model if self.live else 'mock',
+            'vlm_model': self.vlm_model if self.live else 'mock',
+            'live': self.live,
+            'base_url': self.base_url if self.live else '',
+        }
 
     # ---------------------------------------------------------------- chat
     async def chat(self, messages: list[dict[str, Any]], *,
