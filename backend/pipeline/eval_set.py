@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.app.store import Store
-from backend.app.tools.calc import QUALITY_MULTIPLIER, sell_price
+from backend.app.tools.calc import sell_price
 
 QUALITY_CASES = ['银星', '金星', '铱星']
 ARTISAN_CASES = ['果酒', '果汁', '腌菜']
@@ -85,10 +85,7 @@ def generate(store: Store, per_type: int = 40, seed: int = 42) -> list[EvalCase]
                 return f
         return None
 
-    # 只有作物/农产品/采集物才吃品质加成与加工倍率；
-    # 武器、工具、戒指不适用（否则会造出错误的标准答案）
-    CROP_CATS = {'春季作物', '夏季作物', '秋季作物', '冬季作物', '蔬菜', '水果', '花卉',
-                 '可采集矿物', '古物', '动物制品'}
+    # 武器、工具、戒指不适用品质/加工倍率（否则会造出错误的标准答案）
     NOT_QUALITY = {'武器', '匕首', '剑', '工具', '戒指', '鞋子', '鱼', '传奇鱼',
                    '种子', '原料', '可制作物品'}
 

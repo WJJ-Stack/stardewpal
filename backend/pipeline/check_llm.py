@@ -140,9 +140,9 @@ async def main_async(args) -> None:
     ok = [n for n, v in results.items() if v]
     if ok:
         print(f'可用：{ok}')
-        print(f'\n切换方式（写入 .env）：')
+        print('\n切换方式（写入 .env）：')
         print(f'  LLM_PROVIDER={ok[0]}')
-        print(f'  LLM_API_KEY=<对应 key>')
+        print('  LLM_API_KEY=<对应 key>')
     else:
         print('没有可用的 provider，请先申请免费额度')
 

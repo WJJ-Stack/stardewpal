@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """星露谷 Wiki 数据管道。
 
 从 BWiki 抓取：

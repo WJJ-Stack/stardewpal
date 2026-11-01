@@ -25,10 +25,15 @@ from typing import Any
 
 from backend.app.config import settings
 from backend.app.llm import LLMError, get_llm
-from backend.app.retrieval import (HybridRetriever, Retrieved, build_context,
-                                   classify, extract_entities)
+from backend.app.retrieval import (
+    HybridRetriever,
+    Retrieved,
+    build_context,
+    classify,
+    extract_entities,
+)
 from backend.app.store import Store
-from backend.app.tools.calc import TOOL_SCHEMA, call_tool
+from backend.app.tools.calc import call_tool
 
 ROUTER_SYSTEM = """你是路由分类器。判断用户问题是否需要查询星露谷物语 wiki 知识库。
 必须只输出 JSON，不要任何解释：

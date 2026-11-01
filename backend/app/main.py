@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import time
 from collections import defaultdict, deque
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -188,9 +188,11 @@ def _sse(event: str, data: dict) -> str:
 # ---------------------------------------------------------------- 截图问答
 
 @app.post('/api/vision/analyze')
-async def vision_analyze(request: Request,
-                         file: UploadFile = File(...),
-                         use_vlm: bool = Form(True)) -> dict[str, Any]:
+async def vision_analyze(
+    request: Request,
+    file: Annotated[UploadFile, File()],
+    use_vlm: Annotated[bool, Form()] = True,
+) -> dict[str, Any]:
     _rate_limit(request)
     data = await _read_image(file)
     t0 = time.time()
@@ -200,10 +202,12 @@ async def vision_analyze(request: Request,
 
 
 @app.post('/api/vision/ask')
-async def vision_ask(request: Request,
-                     file: UploadFile = File(...),
-                     question: str = Form(''),
-                     use_vlm: bool = Form(True)) -> dict[str, Any]:
+async def vision_ask(
+    request: Request,
+    file: Annotated[UploadFile, File()],
+    question: Annotated[str, Form()] = '',
+    use_vlm: Annotated[bool, Form()] = True,
+) -> dict[str, Any]:
     _rate_limit(request)
     data = await _read_image(file)
     t0 = time.time()
