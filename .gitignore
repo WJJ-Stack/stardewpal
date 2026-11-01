@@ -39,7 +39,3 @@ backend/data/stardewpal.db
 .DS_Store
 Thumbs.db
 *.log
-
-# CI workflow 需要 workflow token scope 才能推送
-# 已完成 gh auth refresh -s workflow 后可移除本行
-.github/
