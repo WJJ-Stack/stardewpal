@@ -1,5 +1,8 @@
 # StardewPal · 星露谷物语多模态问答助手
 
+> **在线演示**：[wujaijie-stardewpal.ms.show](https://wujaijie-stardewpal.ms.show)
+> **源码**：[github.com/WJJ-Stack/stardewpal](https://github.com/WJJ-Stack/stardewpal)
+
 一个**能用截图提问**的游戏知识库问答系统。基于社区 Wiki 构建，覆盖 OCR、图像匹配、
 混合检索与工具计算，并提供自动生成的评测集与可观测性。
 
