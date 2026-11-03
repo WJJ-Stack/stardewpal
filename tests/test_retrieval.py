@@ -1,8 +1,7 @@
 """检索与清洗单元测试：这些逻辑直接决定回答质量。"""
 from __future__ import annotations
 
-from backend.app.retrieval import (_core_entity, _title_affinity, classify,
-                                   expand_query)
+from backend.app.retrieval import _core_entity, _title_affinity, classify, expand_query
 from backend.pipeline.chunker import chunk_text, numeric_facts
 
 

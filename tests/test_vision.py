@@ -5,12 +5,10 @@ import io
 
 import numpy as np
 import pytest
-from PIL import Image, ImageDraw
+from PIL import Image
 
-from backend.app.vision.icons import (IconIndex, feat_color, feat_phash,
-                                      feat_pixel, feat_shape)
-from backend.app.vision.ocr import (TextBox, sort_reading_order,
-                                    split_glued_text, summarize)
+from backend.app.vision.icons import IconIndex, feat_color, feat_phash, feat_pixel, feat_shape
+from backend.app.vision.ocr import TextBox, sort_reading_order, split_glued_text, summarize
 
 
 def _solid(color=(200, 120, 60, 255), size=(48, 48)) -> Image.Image:
@@ -118,17 +116,27 @@ class TestToB64:
         assert raw[:4] == b'\x89PNG'
 
 
-class TestSlicing:
-    def test_tiles_generated(self):
-        from backend.app.vision.pipeline import _slice_tiles
+class TestImageHelpers:
+    """v3 极简管线的图像工具（不再有切片/裁剪逻辑）。"""
 
-        img = Image.new('RGB', (200, 150), (0, 0, 0))
-        tiles = _slice_tiles(img)
-        assert len(tiles) > 0
-        assert len(tiles) <= 24
+    def test_fit_downscales_large(self):
+        from backend.app.vision.pipeline import _fit
 
-    def test_small_image_single_tile(self):
-        from backend.app.vision.pipeline import _slice_tiles
+        img = Image.new('RGB', (3000, 2000), (0, 0, 0))
+        out = _fit(img, 1400)
+        assert max(out.size) == 1400
 
-        img = Image.new('RGB', (40, 40), (0, 0, 0))
-        assert len(_slice_tiles(img)) == 1
+    def test_fit_keeps_small(self):
+        from backend.app.vision.pipeline import _fit
+
+        img = Image.new('RGB', (640, 480), (0, 0, 0))
+        assert _fit(img, 1400).size == (640, 480)
+
+    def test_load_converts_mode(self):
+
+        from backend.app.vision.pipeline import _load
+
+        buf = io.BytesIO()
+        Image.new('P', (32, 32)).save(buf, format='PNG')
+        out = _load(buf.getvalue())
+        assert out.mode in ('RGB', 'RGBA')

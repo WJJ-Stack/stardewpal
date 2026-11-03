@@ -1,4 +1,4 @@
-"""Agent 决策层：判断是否检索、结果是否充分、是否需要计算。
+﻿"""Agent 决策层：判断是否检索、结果是否充分、是否需要计算。
 
 为什么需要 Agent，而不是"永远检索 + 直接回答"
 --------------------------------------------
@@ -30,40 +30,43 @@ from backend.app.retrieval import (
     Retrieved,
     build_context,
     classify,
-    extract_entities,
 )
 from backend.app.store import Store
 from backend.app.tools.calc import call_tool
 
-ROUTER_SYSTEM = """你是路由分类器。判断用户问题是否需要查询星露谷物语 wiki 知识库。
-必须只输出 JSON，不要任何解释：
-{"need_retrieval": true/false, "reason": "简短原因", "query": "改写后的检索词"}
+# ---------------------------------------------------------------- 提示词
 
-判断规则：
-- 需要检索：涉及具体数值（卖价/生长天数/利润）、具体物品/角色/地点、游戏机制细节
-- 不需要检索：打招呼、闲聊、让重述上文、纯概念性提问
-- query 改写要点：把口语转换为 wiki 术语，补上关键实体名"""
+SYSTEM_PROMPT = """你是《星露谷物语》的攻略助手。下面会附上从 wiki 检索到的原文。
 
-SUFFICIENCY_SYSTEM = """你是检索充分性判断器。给定问题和已检索到的资料，判断资料是否足以回答。
-必须只输出 JSON：
-{"sufficient": true/false, "reason": "原因", "missing": "缺什么信息", "better_query": "如果不足，给出更好的检索词"}
+**怎么用这些资料，由你自己判断**：
+- 相关的就用，不相关的就忽略，不必强行引用
+- 资料里有的，用资料里的事实说话，关键数值注明来源编号如 [1]
+- 资料里没有的，说"资料里没有"，不要编
+- 结合对话历史理解用户的指代（"这个""它""那题"）
+- 用户提出猜测时（"这不就是XX吗"），按资料核实后再确认或否定，不要盲目附和
+- 资料和你的常识冲突时，以资料为准
 
-判断规则：
-- sufficient=true：资料中已包含回答问题所需的全部关键事实
-- sufficient=false：缺少关键数值、缺少对比对象、或资料完全不相关
-- 如果问题需要多个数字做比较，只找到一个也算不足"""
+**不要把现实世界的历法套到游戏上**：
+游戏里只有四季（春/夏/秋/冬），每季 28 天，没有"月份"。
+wiki 写"春季15日"就是游戏内的第 15 天，**不存在"3月15日"这种说法**。
+用户问"几月几号"时，按资料答"春季15日"，不要换算成现实月份。
+同理，不要给游戏内时间补上"周一到周日""上午下午"之外的现实概念。
 
-ANSWER_SYSTEM = """你是星露谷物语的攻略助手。基于提供的资料回答问题。
+**不要把一个条目的结论套到另一个条目上**：
+资料里"卡利科三花蛋节日后消失"说的是三花蛋，不是服装、不是家具、
+也不是任何别的东西。每条事实都有它自己的主语，
+换主语之前先确认资料里真的这么写了，没写就不说。
+同理，看到图里有高亮框、光标、"已选中"之类的视觉标记时，
+不要据此推断"答案就是这个"——高亮可能只是光标停在那里。
 
-硬性规则：
-1. **只用资料中的事实回答**，资料没有的信息明确说"资料中未提及"
-2. **所有数值必须标注来源编号**，格式如 [1]
-3. **不做心算**。需要计算时，先说明计算依据，由工具给出结果
-4. 回答简洁，先说结论，再说细节
-5. 如果资料相互矛盾，指出矛盾点
+**答完就停**：
+问题问「选哪个」就给出选项；问「几号」就给出日期。
+不要额外解释游戏的设计意图、不要评价这个机制合不合理、
+不要补一句「顺便一提…」——这类收尾几乎全是编的。
+资料里没写为什么要这样设计，那就不要谈设计。
 
-资料格式：[编号] 来源：《页面标题》· 章节
-"""
+回答要自然，像在跟玩家聊天，不必照抄资料原文，
+也不必套固定格式。资料够就直接答，不够就说不知道。"""
 
 
 @dataclass
@@ -102,62 +105,10 @@ class Agent:
         )
         self.llm = get_llm()
 
-    # ---------------------------------------------------------------- 路由
-    async def _route(self, question: str, trace: Trace) -> dict[str, Any]:
-        # 硬拦截：问题明确指向其他作品时，无论模型怎么判断都强制检索，
-        # 由后续相关性门控触发拒答。
-        # 原因：模型对《原神》《我的世界》等热门内容有训练记忆，
-        # 会绕过知识库直接凭记忆作答，而这类回答无法核实、也超出本项目范围。
-        if _mentions_other_domain(question):
-            trace.add('route_forced_retrieval', reason='问题涉及本知识库范围外的作品')
-            return {'need_retrieval': True, 'reason': '跨域问题强制走检索+门控',
-                    'query': question}
 
-        try:
-            res = await self.llm.chat(
-                [{'role': 'system', 'content': ROUTER_SYSTEM},
-                 {'role': 'user', 'content': question}],
-                temperature=0.0, max_tokens=200,
-            )
-            data = _extract_json(res.content)
-            if data and 'need_retrieval' in data:
-                trace.add('route', need_retrieval=data['need_retrieval'],
-                          reason=data.get('reason'), query=data.get('query'))
-                return data
-        except LLMError as e:
-            trace.add('route_error', error=str(e)[:200])
-
-        # 降级：规则路由
-        flags = classify(question)
-        need = flags['numeric'] or flags['compare'] or len(question) > 6
-        trace.add('route_fallback', need_retrieval=need)
-        return {'need_retrieval': need, 'reason': '规则降级', 'query': question}
-
-    # ---------------------------------------------------------------- 检索
     def _search(self, query: str, top_k: int) -> list[Retrieved]:
         return self.retriever.retrieve(query, top_k=top_k)
 
-    async def _check_sufficient(self, question: str, chunks: list[Retrieved],
-                                trace: Trace) -> dict[str, Any]:
-        if not chunks:
-            return {'sufficient': False, 'reason': '无检索结果',
-                    'better_query': question}
-        ctx = build_context(chunks, max_chars=2400)
-        try:
-            res = await self.llm.chat(
-                [{'role': 'system', 'content': SUFFICIENCY_SYSTEM},
-                 {'role': 'user', 'content': f'问题：{question}\n\n资料：\n{ctx}'}],
-                temperature=0.0, max_tokens=250,
-            )
-            data = _extract_json(res.content) or {}
-            trace.add('sufficiency', sufficient=data.get('sufficient'),
-                      reason=data.get('reason'), better_query=data.get('better_query'))
-            return data
-        except LLMError as e:
-            trace.add('sufficiency_error', error=str(e)[:200])
-            return {'sufficient': len(chunks) >= 2, 'reason': '降级判断'}
-
-    # ---------------------------------------------------------------- 计算
     def _maybe_calculate(self, question: str, chunks: list[Retrieved],
                          trace: Trace) -> list[dict[str, Any]]:
         """识别数值题并调用计算工具。
@@ -167,6 +118,15 @@ class Agent:
         """
         if not settings.enable_calculator:
             return []
+
+        # 先看多选题：问题里有 2 个以上大数字，且资料里说要取「中间值」。
+        # 这类题不能走卖价计算，必须走中位数工具。
+        # 实测模型有两种错法：把「中间值」当平均值（答出选项里没有的 558953.5），
+        # 或直接选屏幕上高亮的那个而不是数值排序后的中间那个。
+        median = self._maybe_median(question, chunks, trace)
+        if median:
+            return median
+
         flags = classify(question)
         if not (flags['numeric'] or flags['calc']):
             return []
@@ -208,6 +168,44 @@ class Agent:
 
         return results
 
+    def _maybe_median(self, question: str, chunks: list[Retrieved],
+                      trace: Trace) -> list[dict[str, Any]]:
+        """多选题：从资料里确认规则，再算数值中位数。
+
+        触发条件必须**同时**满足，缺一不可：
+          ① 问题里有 >= 2 个大数字（选项）
+          ② 检索到的资料里出现「中间值/中值/中位数」这类措辞
+
+        只看条件 ① 会误伤「防风草 35 金 和 蓝莓 50 金」这种正常对比；
+        只看条件 ② 又会在资料没命中时硬算。
+        """
+        options = [float(x) for x in re.findall(r'\d{3,}', question)]
+        if len(options) < 2:
+            return []
+
+        rule = ''
+        for c in chunks:
+            if _MEDIAN_RULE.search(c.text):
+                rule = _MEDIAN_RULE.search(c.text).group(0)
+                break
+        if not rule:
+            trace.add('median_skip', reason='资料里没有「取中间值」的规则')
+            return []
+
+        try:
+            out = call_tool('median_of_options', {'values': options})
+            if out.get('error'):
+                trace.add('median_error', error=out['error'])
+                return []
+            out['item'] = '选项'
+            out['input'] = {'values': options}
+            out['rule'] = rule
+            trace.add('median', values=options, value=out.get('value'), rule=rule)
+            return [out]
+        except Exception as e:  # noqa: BLE001
+            trace.add('median_error', error=str(e)[:150])
+            return []
+
     def _find_item(self, question: str, chunks: list[Retrieved]) -> dict[str, Any] | None:
         """在问题中定位物品。
 
@@ -235,122 +233,157 @@ class Agent:
         return None
 
     # ---------------------------------------------------------------- 主流程
+
     async def run(self, question: str, *, top_k: int | None = None,
-                  vision_ctx: dict[str, Any] | None = None) -> AgentResult:
+                  vision_ctx: dict[str, Any] | None = None,
+                  history: list[dict[str, str]] | None = None,
+                  image_b64: str | None = None) -> AgentResult:
+        """主流程：**先查 wiki，再让模型自己回答**。
+
+        只有两步，没有中间判断层：
+          1. 检索：用用户原话（+ 截图）去 wiki 查，拿回原文
+          2. 回答：wiki 原文 + 对话历史 + 用户问题一起交给模型，自由作答
+
+        为什么不再让模型自己决定「要不要检索」：
+        实测同一个问题问两次，一次查一次不查。查的那次答对了，
+        没查的那次说"我需要更多上下文"。既然这是星露谷知识库，
+        用户问的东西基本都该查，那就一律查。
+        """
         trace = Trace()
         top_k = top_k or settings.top_k_final
-        queries: list[str] = []
-        all_chunks: list[Retrieved] = []
-        calc_results: list[dict[str, Any]] = []
-        mocked = False
 
         q = question
-        if vision_ctx:
+        if vision_ctx and not image_b64:
             q = _merge_vision_query(question, vision_ctx)
             trace.add('vision_merge', merged_query=q[:120])
 
-        route = await self._route(q, trace)
-        if not route.get('need_retrieval', True):
-            answer = await self._answer_without_retrieval(q, trace)
-            return AgentResult(answer=answer, citations=[], queries=[], trace=trace.as_list(),
-                               mocked=mocked, vision=vision_ctx)
+        # ---- 第一步：检索（无条件）
+        #
+        # 截图问题必须**先看图提取检索线索**再检索。
+        # 否则检索词只有「这是什么场景」这种泛问，图片信息完全用不上，
+        # 实测会命中《山姆》《星露谷展览会》这类无关页面。
+        search_q = q
+        hints = ''
+        if image_b64:
+            hints = await self._vision_search_hints(image_b64, q, trace)
+            if hints:
+                search_q = f'{q} {hints}'
+                trace.add('vision_hints', hints=hints[:160])
 
-        search_q = route.get('query') or q
-        queries.append(search_q)
+        # 清洗检索词：去掉数字/题号等噪声，否则 BM25 会被带偏
+        search_q = clean_search_query(search_q) or q
+        raw_hits = self._search(search_q, top_k)
+        # 把窄块还原成上下文窗口：切块会把「问题」和「答案」分到不同块里，
+        # 只给 rank1 等于给模型一道没有答案的题（它会自己编，比如「每年秋季15日」）
+        chunks = self.retriever.expand(raw_hits, query=search_q)
+        trace.add('retrieve', query=search_q[:100], hits=len(chunks),
+                  top=[c.title for c in chunks[:3]])
 
-        step = 0
-        while step < settings.max_agent_steps:
-            step += 1
-            chunks = self._search(search_q, top_k)
-            trace.add('retrieve', round=step, query=search_q, hits=len(chunks),
-                      top=[c.title for c in chunks[:3]])
-            all_chunks = _merge_chunks(all_chunks, chunks)
+        # 数值题走确定性计算（算术正确性，与语言理解无关）。
+        # 截图路径要注意：题目选项在**图里**，不在 q 里，
+        # 所以这里要把 VLM 抄出来的 hints 一起交给计算层，
+        # 否则「这题该选哪个」这种问法永远触发不了中位数工具
+        # （实测截图问答时 calc 为空，全靠模型自己心算，两次一次对一次错）。
+        calc_q = f'{q} {hints}' if (image_b64 and hints) else q
+        calc_results = self._maybe_calculate(calc_q, chunks, trace)
 
-            if step == 1:
-                calc_results = self._maybe_calculate(q, all_chunks, trace)
+        # ---- 第二步：组装 messages，交给模型自由回答
+        messages: list[dict[str, Any]] = [
+            {'role': 'system', 'content': self._build_system(chunks)},
+        ]
+        for h in (history or [])[-6:]:
+            hq = str(h.get('question') or '').strip()
+            ha = str(h.get('answer') or '').strip()
+            if hq:
+                messages.append({'role': 'user', 'content': hq[:600]})
+            if ha:
+                messages.append({'role': 'assistant', 'content': ha[:1500]})
 
-            check = await self._check_sufficient(q, all_chunks, trace)
-            if check.get('sufficient'):
-                break
-            better = (check.get('better_query') or '').strip()
-            if not better or better in queries:
-                break
-            queries.append(better)
-            search_q = better
+        user_content: Any = q
+        if calc_results:
+            lines = ['【计算结果（由工具生成）】']
+            for r in calc_results:
+                lines.append(f"- {r.get('item', '')}: {r.get('formula', '')} = {r.get('value')}")
+            user_content = q + '\n\n' + '\n'.join(lines)
 
-        answer, mocked = await self._answer(q, all_chunks, calc_results, trace)
+        if image_b64:
+            messages.append({'role': 'user', 'content': [
+                {'type': 'text', 'text': user_content},
+                {'type': 'image_url',
+                 'image_url': {'url': f'data:image/png;base64,{image_b64}'}},
+            ]})
+            trace.add('image_attached', chars=len(image_b64))
+        else:
+            messages.append({'role': 'user', 'content': user_content})
+
+        answer, mocked = '', False
+        try:
+            res = await self.llm.chat(messages, temperature=0.2, max_tokens=1200)
+            answer = res.content or ''
+            mocked = res.mocked
+            trace.add('answer', mocked=res.mocked, chars=len(answer),
+                      usage=res.usage, with_context=bool(chunks))
+        except LLMError as e:
+            trace.add('answer_error', error=str(e)[:200])
+            answer = ('模型服务暂时不可用。'
+                      + (f'以下是检索到的最相关内容：\n\n《{chunks[0].title}》'
+                         f'{chunks[0].text[:400]}' if chunks else ''))
+
         citations = [
             {'index': i, 'title': c.title, 'section': c.section,
              'score': round(c.score, 4), 'kind': c.kind,
              'snippet': c.text[:220]}
-            for i, c in enumerate(all_chunks[:top_k], start=1)
+            for i, c in enumerate(chunks[:top_k], start=1)
         ]
-        return AgentResult(answer=answer, citations=citations, queries=queries,
+        return AgentResult(answer=answer, citations=citations, queries=[q],
                            trace=trace.as_list(), calc=calc_results, mocked=mocked,
                            vision=vision_ctx)
 
-    async def _answer_without_retrieval(self, q: str, trace: Trace) -> str:
+    async def _vision_search_hints(self, image_b64: str, question: str,
+                                   trace: Trace) -> str:
+        """让 VLM 只看图、说出检索线索，不做判断、不给答案。
+
+        返回用于检索的关键词串（画面文字 + 物品/场景名词）。
+        设计要点：**只提取，不推断**。如果让它顺手判断"这是什么场景"，
+        它会先下一个结论（比如错认成夜市），然后拿这个错误结论去检索，
+        形成自我强化，越查越偏。
+        """
+        # 提示词要点（实测总结）：
+        # 用户常把「浏览器窗口 + 聊天记录 + 游戏画面」整屏截图上传。
+        # VLM 会优先读网页 UI 的文字（工具栏、网址、按钮），
+        # 完全忽略中间那一小块游戏画面。
+        # 所以必须明确指示：忽略外围界面，只读游戏画面。
+        prompt = (
+            '这张图可能是整屏截图：外面是浏览器/软件界面，中间嵌着一张游戏画面。\n'
+            '**请忽略所有外围界面文字**（网址、按钮、菜单、"在线""已连接"这类），'
+            '只看中间那块像素风游戏内容。\n\n'
+            '只做一件事：把**游戏画面里的文字**原样抄下来，'
+            '优先抄这几类：\n'
+            '- 对话/题目/选项（连同数字一起）\n'
+            '- 物品名称、价格、数量\n'
+            '- 界面标题、NPC 名字\n\n'
+            '如果游戏画面里确实没有文字，就列出你看到的主要物体和界面布局特征。\n'
+            '不要判断这是什么场景，不要回答问题，不要推测游戏机制。'
+        )
         try:
-            res = await self.llm.chat(
-                [{'role': 'system', 'content': '你是星露谷物语助手，简洁回答。'},
-                 {'role': 'user', 'content': q}],
-                max_tokens=500,
-            )
-            trace.add('answer_no_rag', mocked=res.mocked)
-            return res.content
+            res = await self.llm.vision(prompt, image_b64, max_tokens=300)
+            text = (res.content or '').strip()
+            # 去掉常见的前缀说明，只保留内容
+            text = text.replace('\n', ' ')
+            return text[:300]
         except LLMError as e:
-            trace.add('answer_error', error=str(e)[:200])
-            return '模型服务暂时不可用，请稍后重试。'
+            trace.add('vision_hints_error', error=str(e)[:150])
+            return ''
 
-    async def _answer(self, q: str, chunks: list[Retrieved],
-                      calc_results: list[dict[str, Any]],
-                      trace: Trace) -> tuple[str, bool]:
-        # 相关性门控：检索到的内容与问题无关时，直接拒答而不是硬答。
-        # 这是抑制幻觉的关键一环——资料存在≠资料相关。
-        relevant = [c for c in chunks if _is_relevant(q, c)]
-        if not relevant and not calc_results:
-            trace.add('answer_refused', reason='检索结果与问题不相关',
-                      considered=len(chunks))
-            return ('资料库中没有找到与该问题相关的信息，无法回答。\n\n'
-                    '本知识库只覆盖《星露谷物语》的内容，'
-                    '如果你问的是其他游戏或领域，我无法提供准确答案。'), False
-        if relevant:
-            chunks = relevant
+    def _build_system(self, chunks: list[Retrieved]) -> str:
+        """把 wiki 原文拼进 system prompt。"""
+        if not chunks:
+            return (SYSTEM_PROMPT
+                    + '\n\n（本次没有检索到相关资料，请根据你已有的理解回答；'
+                      '不确定就直说。）')
+        ctx = build_context(chunks, max_chars=3600)
+        return f'{SYSTEM_PROMPT}\n\n【星露谷物语 wiki 原文】\n{ctx}'
 
-        if not chunks and not calc_results:
-            trace.add('answer_empty')
-            return ('资料库中没有找到与这个问题相关的内容。'
-                    '可以换个问法，或告诉我具体的物品/角色名称。'), False
-
-        ctx = build_context(chunks)
-        calc_block = ''
-        if calc_results:
-            lines = ['【工具计算结果（由工具生成，可直接引用）】']
-            for r in calc_results:
-                lines.append(f"- {r.get('item', '')}: {r.get('formula', '')} = {r.get('value')}")
-                for s in r.get('steps', []):
-                    lines.append(f'  · {s}')
-            calc_block = '\n'.join(lines) + '\n\n'
-
-        user = f'问题：{q}\n\n{calc_block}资料：\n{ctx}'
-        try:
-            res = await self.llm.chat(
-                [{'role': 'system', 'content': ANSWER_SYSTEM},
-                 {'role': 'user', 'content': user}],
-                temperature=0.2, max_tokens=900,
-            )
-            trace.add('answer', mocked=res.mocked,
-                      usage=res.usage, chars=len(res.content))
-            return res.content, res.mocked
-        except LLMError as e:
-            trace.add('answer_error', error=str(e)[:200])
-            # 降级：直接返回检索片段，保证可用性
-            top = chunks[0]
-            return (f'模型服务不可用，以下是检索到的最相关内容：\n\n'
-                    f'《{top.title}》{top.section or ""}\n{top.text[:400]}'), False
-
-
-# ---------------------------------------------------------------- 辅助函数
 
 def _extract_json(text: str) -> dict[str, Any] | None:
     if not text:
@@ -363,17 +396,6 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return data if isinstance(data, dict) else None
     except json.JSONDecodeError:
         return None
-
-
-def _merge_chunks(existing: list[Retrieved], new: list[Retrieved]) -> list[Retrieved]:
-    seen = {c.chunk_id for c in existing}
-    out = list(existing)
-    for c in new:
-        if c.chunk_id not in seen:
-            out.append(c)
-            seen.add(c.chunk_id)
-    out.sort(key=lambda c: -c.score)
-    return out
 
 
 def _pick_number(fields: dict, keys: list[str]) -> float | None:
@@ -403,6 +425,10 @@ def _detect_quality(q: str) -> str:
     return '普通'
 
 
+# 多选题「取中间值」的规则措辞（wiki《沙漠节》学者题原文：
+# 「三个数字的中间值将会是正确答案（此处指的是三个数字的中值而非中间的选项）」）
+_MEDIAN_RULE = re.compile(r'中间值|中值|中位数|取中间')
+
 GROWTH_PATTERNS = ('几天', '多久', '成熟', '生长', '长成', '天数')
 
 
@@ -421,52 +447,7 @@ def _detect_artisan(q: str) -> str | None:
     return None
 
 
-def _is_relevant(question: str, chunk: Retrieved) -> bool:
-    """判断检索片段是否与问题相关。
-
-    难点：问题常含「跨作品实体」——问「原神胡桃」，库里却有「胡桃木茶几」。
-    实体字面命中≠相关，必须区分「被问的主体」与「构词前缀」。
-
-    同时支持对比题：命中问题中任意实体即算相关。
-    """
-    # ---- 防线 1：明确提及其他作品 → 直接判不相关
-    if _mentions_other_domain(question):
-        return False
-
-    entities = extract_entities(question)
-    t = chunk.title
-
-    # ---- 防线 2：任一实体在标题中占主导地位
-    for ent in entities:
-        if not ent or ent not in t:
-            continue
-        # 单字实体（「蒜」「蛋」「鱼」）只在标题完全等于实体时放行，
-        # 否则会被「蒜油」「鱼饵」大量误命中；但也必须能命中真正的单字条目
-        if len(ent) == 1:
-            if t == ent:
-                return True
-            continue
-        # 「胡桃木茶几」里「胡桃」只是构词前缀
-        if len(t) > len(ent) + 1 and not _is_entity_suffix_ok(t, ent):
-            continue
-        return True
-
-    # ---- 防线 3：实体出现在正文中（对比题的另一方常只出现在正文）
-    text = chunk.text
-    for ent in entities:
-        if len(ent) >= 2 and ent in text:
-            return True
-
-    # ---- 防线 4：单字实体问题放宽（如「蒜几天成熟」）
-    if any(len(e) == 1 for e in entities):
-        for ent in entities:
-            if len(ent) == 1 and ent in t:
-                return True
-
-    # ---- 防线 5：无实体命中 → 只有非常高的分数才放行
-    return chunk.score > 0.055
-
-
+# 明确属于其他作品的实体。命中即判定为跨域问题。
 OTHER_DOMAIN = {
     '原神': '原神', '崩坏': '崩坏', '星穹铁道': '星穹铁道', '明日方舟': '明日方舟',
     '我的世界': '我的世界', 'minecraft': 'minecraft', '塞尔达': '塞尔达',
@@ -486,24 +467,6 @@ def _mentions_other_domain(question: str) -> bool:
     return False
 
 
-def _is_entity_suffix_ok(title: str, core: str) -> bool:
-    """核心实体在标题中作为独立主体出现。
-
-    「钻石矿」→ 钻石相关，放行
-    「胡桃木茶几」→ 木是构词成分，拒绝
-    「防风草种子」→ 种子是衍生物，仍与主体强相关，放行
-    """
-    idx = title.find(core)
-    if idx < 0:
-        return False
-    rest = title[idx + len(core):]
-    if rest and rest[0] in '木色形纹制':
-        return False
-    return True
-
-
-
-
 def _merge_vision_query(question: str, vision: dict[str, Any]) -> str:
     parts = [question]
     if vision.get('entities'):
@@ -511,3 +474,41 @@ def _merge_vision_query(question: str, vision: dict[str, Any]) -> str:
     if vision.get('items'):
         parts.append(' '.join(str(i.get('name', '')) for i in vision['items'][:3]))
     return ' '.join(p for p in parts if p).strip()
+
+
+# 检索词清洗时要去掉的标点（统一换成空格）
+_PUNCT_TO_SPACE = str.maketrans({
+    c: ' ' for c in
+    '，。！？、；：“”‘’（）()[]{}<>《》!?.,;:\'"/\\|~`@#$%^&*+=_-'
+})
+
+
+def clean_search_query(text: str) -> str:
+    """清洗检索词：去掉对 BM25 有害的噪声。
+
+    保留：中文短语、物品名、英文名
+    去掉：长数字（金额/步数/选项）、题号、标点、空白
+
+    为什么必须去掉数字：
+    实测「问题3：你一共走了多少步？224175 896702 448351」检索到《蟹笼》
+    （因为那页有很多数字），而「你一共走了多少步」能正确命中《沙漠节》。
+    数字在 BM25 里是高权重的"精确匹配"，会把真正含语义的页面挤掉。
+    """
+    import re as _re
+
+    if not text:
+        return ''
+    t = text
+    # 题号：「问题3」「第3题」「Question 3」
+    t = _re.sub(r'(?:问题|第)\s*\d+\s*(?:题)?', ' ', t)
+    t = _re.sub(r'\bquestion\s*\d+\b', ' ', t, flags=_re.I)
+    # 长数字（3 位以上，含千分位）—— 选项数字、金额、步数
+    t = _re.sub(r'\d{1,3}(?:,\d{3})+', ' ', t)
+    t = _re.sub(r'\b\d{3,}\b', ' ', t)
+    # 标点：用 translate 而不是正则字符类。
+    # 这串标点里有 \ [ ' " / 等正则元字符，塞进 [...] 里需要层层转义，
+    # 之前漏转义 \[ 触发 SyntaxWarning，也很难读。
+    t = t.translate(_PUNCT_TO_SPACE)
+    # 压缩空白
+    t = _re.sub(r'\s+', ' ', t).strip()
+    return t

@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     llm_timeout: float = 60.0
     llm_max_retries: int = 3
 
+    # 视觉模型可独立配置（不同 provider 能力差异很大）
+    # 实测：qwen3-vl-plus 远强于 glm-4v-flash，尤其是指向定位类问题
+    vlm_provider: str = ""             # 留空则跟随 llm_provider
+    vlm_api_key: str = ""
+    vlm_base_url: str = ""
+
     # ---- 检索 ----
     top_k_dense: int = 20
     top_k_sparse: int = 20
@@ -108,7 +114,7 @@ PROVIDER_PRESETS: dict[str, dict[str, str]] = {
 
 
 def resolve_provider() -> dict[str, str]:
-    """合并 provider 预设与显式配置。"""
+    """合并 provider 预设与显式配置（文本模型）。"""
     name = (settings.llm_provider or "qwen").strip().lower()
     preset = PROVIDER_PRESETS.get(name, PROVIDER_PRESETS["qwen"])
     return {
@@ -117,6 +123,26 @@ def resolve_provider() -> dict[str, str]:
         "model": settings.llm_model or preset["model"],
         "vlm_model": settings.vlm_model or preset["vlm_model"],
         "api_key": settings.api_key,
+    }
+
+
+def resolve_vision() -> dict[str, str]:
+    """解析视觉模型配置。
+
+    视觉模型允许独立于文本模型（VLM_PROVIDER / VLM_API_KEY / VLM_BASE_URL），
+    因为实测不同服务商的视觉能力差距很大：
+      glm-4v-flash（4B，免费）→ 手指定位类问题基本失败
+      qwen3-vl-plus            → 能准确指出所指位置
+    """
+    name = (settings.vlm_provider or settings.llm_provider or "qwen").strip().lower()
+    preset = PROVIDER_PRESETS.get(name, PROVIDER_PRESETS["qwen"])
+    api_key = settings.vlm_api_key or settings.api_key
+    return {
+        "name": name,
+        "base_url": (settings.vlm_base_url or settings.llm_base_url
+                     or preset["base_url"]).rstrip("/"),
+        "model": settings.vlm_model or preset["vlm_model"],
+        "api_key": api_key,
     }
 
 

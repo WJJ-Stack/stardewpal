@@ -24,17 +24,27 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-SRC = ROOT.parent / 'ms-push'
+SRC = ROOT / '.archive' / 'ms-push'
 STUDIO_ID = 'wujaijie/stardewpal'
 HARDWARE = 'platform/2v-cpu-8g-mem'   # 免费 CPU 2 核 8G
 
+# 运行时注入的环境变量。
+# 文本模型与视觉模型**分别**配置——本地实测 qwen3-vl-plus 远强于 glm-4v-flash，
+# 所以 VLM 单独走通义。两份 key 都要注入，只注入 LLM_API_KEY 会让截图功能失效。
+#
+# 这里的值是兜底默认；真实值从本地 .env 读取（见 inject_secrets）。
 VARIABLES = {
+    'PORT': '7860',
     'LLM_PROVIDER': 'zhipu',
     'LLM_MODEL': 'glm-4-flash',
-    'VLM_MODEL': 'glm-4v-flash',
     'LLM_BASE_URL': 'https://open.bigmodel.cn/api/paas/v4',
-    'PORT': '7860',
+    'VLM_PROVIDER': 'qwen',
+    'VLM_MODEL': 'qwen3-vl-plus',
+    'VLM_BASE_URL': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
 }
+
+# 需要以 secret 形式注入的键（不能进仓库）
+SECRET_KEYS = ('LLM_API_KEY', 'VLM_API_KEY')
 
 
 def _api():
@@ -43,14 +53,19 @@ def _api():
     return HubApi()
 
 
-def _read_local_key() -> str | None:
+def _read_local_env() -> dict[str, str]:
+    """读取本地 .env（键值对）。缺失返回空字典。"""
     env = ROOT / '.env'
     if not env.exists():
-        return None
+        return {}
+    out: dict[str, str] = {}
     for line in env.read_text(encoding='utf-8').splitlines():
-        if line.startswith('LLM_API_KEY='):
-            return line.split('=', 1)[1].strip()
-    return None
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        k, v = line.split('=', 1)
+        out[k.strip()] = v.strip()
+    return out
 
 
 def show_status() -> None:
@@ -85,24 +100,39 @@ def ensure_settings() -> None:
 
 
 def inject_secrets() -> None:
-    """注入 API Key（secret）与普通配置（variable）。"""
-    api = _api()
-    key = _read_local_key()
-    if key:
-        try:
-            api.add_studio_secret(STUDIO_ID, 'LLM_API_KEY', key)
-            print('secret LLM_API_KEY 已设置')
-        except Exception as e:  # noqa: BLE001
-            print(f'secret 设置失败（可能已存在）: {str(e)[:100]}')
-            try:
-                api.update_studio_secret(STUDIO_ID, 'LLM_API_KEY', key)
-                print('secret LLM_API_KEY 已更新')
-            except Exception as e2:  # noqa: BLE001
-                print(f'更新也失败: {str(e2)[:100]}')
-    else:
-        print('未找到本地 LLM_API_KEY，跳过（将进入 mock 模式）')
+    """注入 API Key（secret）与普通配置（variable）。
 
-    for k, v in VARIABLES.items():
+    secret 与 variable 要分开处理：
+      · API Key 走 secret（加密存储，日志里不可见）
+      · provider/model/base_url 走 variable（普通环境变量）
+    两份 key（文本 + 视觉）都要注入，只给文本 key 会导致截图问答静默降级。
+    """
+    api = _api()
+    local = _read_local_env()
+
+    # 1) secrets
+    for k in SECRET_KEYS:
+        val = local.get(k)
+        if not val:
+            print(f'未找到本地 {k}，跳过')
+            continue
+        try:
+            api.add_studio_secret(STUDIO_ID, k, val)
+            print(f'secret {k} 已设置')
+        except Exception as e:  # noqa: BLE001
+            try:
+                api.update_studio_secret(STUDIO_ID, k, val)
+                print(f'secret {k} 已更新')
+            except Exception as e2:  # noqa: BLE001
+                print(f'{k} 设置失败: {str(e)[:80]} / {str(e2)[:80]}')
+
+    # 2) variables（本地 .env 优先，缺失用默认）
+    variables = dict(VARIABLES)
+    for k in list(variables):
+        if local.get(k):
+            variables[k] = local[k]
+
+    for k, v in variables.items():
         try:
             api.add_studio_variable(STUDIO_ID, k, v)
         except Exception:  # noqa: BLE001
@@ -110,7 +140,7 @@ def inject_secrets() -> None:
                 api.update_studio_variable(STUDIO_ID, k, v)
             except Exception:  # noqa: BLE001
                 pass
-    print(f'variables 已设置: {list(VARIABLES)}')
+    print(f'variables 已设置: {sorted(variables)}')
 
 
 def upload() -> None:
@@ -171,11 +201,17 @@ def main() -> None:
     ap.add_argument('--deploy', action='store_true', help='上传 + 配置 + 部署')
     ap.add_argument('--logs', action='store_true', help='跟踪构建日志')
     ap.add_argument('--no-upload', action='store_true', help='只部署不上传')
+    ap.add_argument('--src', default=None, help='上传源目录（默认 .archive/ms-push）')
+    ap.add_argument('--skip-watch', action='store_true', help='触发部署后不跟踪日志')
     args = ap.parse_args()
 
     if args.check or not any([args.deploy, args.logs]):
         show_status()
         return
+
+    global SRC
+    if args.src:
+        SRC = Path(args.src)
 
     if args.deploy:
         ensure_settings()
@@ -183,7 +219,8 @@ def main() -> None:
         if not args.no_upload:
             upload()
         deploy()
-        watch_logs()
+        if not args.skip_watch:
+            watch_logs()
     elif args.logs:
         watch_logs()
 

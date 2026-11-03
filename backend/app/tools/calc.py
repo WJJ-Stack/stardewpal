@@ -70,9 +70,13 @@ class CalcResult:
     value: float
     formula: str
     steps: list[str]
+    # 结果单位（'金' / '金/天' / ''）。不是所有计算都产出货币：
+    # 中位数题的输出是选项数值，硬标「金」会写成「448351 金」。
+    unit: str = ''
 
     def as_dict(self) -> dict[str, Any]:
-        return {'value': round(self.value, 2), 'formula': self.formula, 'steps': self.steps}
+        return {'value': round(self.value, 2), 'formula': self.formula,
+                'steps': self.steps, 'unit': self.unit}
 
 
 def sell_price(base: float, quality: str = '普通', profession: str = '无',
@@ -128,7 +132,7 @@ def sell_price(base: float, quality: str = '普通', profession: str = '无',
     if quality != '普通' and (not artisan or artisan not in QUALITY_EXEMPT):
         formula += f' × {QUALITY_MULTIPLIER[quality]}'
 
-    return CalcResult(value=math.floor(value), formula=formula, steps=steps)
+    return CalcResult(value=math.floor(value), formula=formula, steps=steps, unit='金')
 
 
 def compare_growth(days_a: float, yield_a: float, price_a: float,
@@ -143,7 +147,7 @@ def compare_growth(days_a: float, yield_a: float, price_a: float,
         f'{"A" if gpd_a > gpd_b else "B"} 更优',
     ]
     return CalcResult(value=max(gpd_a, gpd_b), formula='日均收益 = 产量 × 单价 ÷ 生长天数',
-                      steps=steps)
+                      steps=steps, unit='金/天')
 
 
 def regrow_total(base_yield: float, price: float, first_growth: float,
@@ -162,7 +166,34 @@ def regrow_total(base_yield: float, price: float, first_growth: float,
         f'总收益 = {harvests} × {_fmt(base_yield)} × {_fmt(price)} = {_fmt(total)} 金',
     ]
     return CalcResult(value=math.floor(total),
-                      formula='收获次数 × 单次产量 × 单价', steps=steps)
+                      formula='收获次数 × 单次产量 × 单价', steps=steps, unit='金')
+
+
+def median_of_options(values: list[float]) -> CalcResult:
+    """三个选项取中间值（沙漠节「你一共走了多少步」那题的固定解法）。
+
+    为什么必须做成工具
+    ------------------
+    wiki 原文：「三个数字的中间值将会是正确答案（此处指的是三个数字的中值
+    而非中间的选项）」。实测模型有两种错法：
+      ① 把「中间值」当成平均值：(224175+896702)/2 = 558953.5，答出选项里没有的数
+      ② 直接选屏幕上高亮的那个，而不是按数值排序
+    同一题问两次，一次对一次错 —— 语气都同样自信。
+
+    正确解法：排序后取下标 len//2 的元素（中位数），不是平均、不是取中间选项。
+    """
+    nums = sorted(float(v) for v in values)
+    n = len(nums)
+    if n == 0:
+        raise ValueError('数值列表为空')
+    mid = nums[n // 2] if n % 2 else (nums[n // 2 - 1] + nums[n // 2]) / 2
+    steps = [
+        f'原始选项：{", ".join(_fmt(v) for v in values)}',
+        f'按大小排序：{", ".join(_fmt(v) for v in nums)}',
+        f'取中间那个（第 {n // 2 + 1} 位）：{_fmt(mid)}',
+        '注意：是「中位数」，不是平均值，也不是屏幕上排在中间的那个选项',
+    ]
+    return CalcResult(value=mid, formula=f'{n} 个数的中位数', steps=steps)
 
 
 def _fmt(v: float) -> str:
@@ -218,12 +249,25 @@ TOOL_SCHEMA = [
             'required': ['base_yield', 'price', 'first_growth', 'regrow'],
         },
     },
+    {
+        'name': 'median_of_options',
+        'description': '从多个数值选项里取中位数（按大小排序后的中间值，不是平均值）',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'values': {'type': 'array', 'items': {'type': 'number'},
+                           'description': '题目给出的全部数值选项'},
+            },
+            'required': ['values'],
+        },
+    },
 ]
 
 TOOL_FUNCS = {
     'sell_price': sell_price,
     'compare_growth': compare_growth,
     'regrow_total': regrow_total,
+    'median_of_options': median_of_options,
 }
 
 

@@ -22,32 +22,159 @@ import base64
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 OWNER_REPO = 'WJJ-Stack/stardewpal'
 BRANCH = 'master'
-MAX_FILE = 20 * 1024 * 1024  # 超过则跳过（API 单文件上限更严）
-# 这些大文件已通过其他方式同步，重复写入易触发 HTTP/2 流错误
-SKIP_LARGE_MARKERS = ('.onnx', '.zip', '.db')
+MAX_FILE = 20 * 1024 * 1024  # 普通 blob 上限
+# .gitattributes 里声明走 LFS 的后缀。这些文件不能当普通 blob 推，
+# 否则远程拿到的是真实字节而非 LFS 指针，与 .gitattributes 冲突。
+LFS_MARKERS = ('.onnx', '.zip', '.db')
+LFS_BATCH = 'https://github.com/{repo}.git/info/lfs/objects/batch'
+
+
+LFS_CACHE = Path(__file__).resolve().parents[2] / '.archive' / 'lfs_cache.json'
+
+
+def _load_cache() -> dict:
+    try:
+        return json.loads(LFS_CACHE.read_text(encoding='utf-8'))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _save_cache(cache: dict) -> None:
+    try:
+        LFS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        LFS_CACHE.write_text(json.dumps(cache, indent=1), encoding='utf-8')
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def gh_api(method: str, path: str, payload: dict | None = None) -> dict:
     cmd = ['gh', 'api', '--method', method, path]
     if payload is not None:
         cmd += ['--input', '-']
-    r = subprocess.run(cmd, input=json.dumps(payload) if payload is not None else None,
-                       capture_output=True, text=True, check=False)
+    body = json.dumps(payload, ensure_ascii=False) if payload is not None else None
+    # 同样必须显式 utf-8：payload 里有中文提交信息，
+    # 不指定编码时 Windows 按 GBK 处理 stdin/stdout 会出错。
+    r = subprocess.run(cmd, input=body, capture_output=True, text=True,
+                       encoding='utf-8', errors='replace', check=False)
     if r.returncode != 0:
-        raise SystemExit(f'{method} {path} 失败: {r.stderr[:400]}')
-    out = r.stdout.strip()
+        raise SystemExit(f'{method} {path} 失败: {(r.stderr or "")[:400]}')
+    out = (r.stdout or '').strip()
     return json.loads(out) if out else {}
 
 
+def _lfs_batch(repo: str, objects: list[dict], attempts: int = 4) -> dict:
+    """POST /lfs/objects/batch，返回各文件的上传地址。
+
+    github.com:443 在本网络很不稳（偶发 wsarecv 超时），
+    失败就退避重试；连续失败才真报错。
+    """
+    url = LFS_BATCH.format(repo=repo)
+    payload = {
+        'operation': 'upload',
+        'transfers': ['basic'],
+        'objects': objects,
+    }
+    last_err = ''
+    for i in range(attempts):
+        r = subprocess.run(
+            ['gh', 'api', '--method', 'POST', url,
+             '-H', 'Accept: application/vnd.git-lfs+json',
+             '-H', 'Content-Type: application/vnd.git-lfs+json',
+             '--input', '-'],
+            input=json.dumps(payload), capture_output=True, text=True, check=False)
+        if r.returncode == 0 and r.stdout.strip():
+            return json.loads(r.stdout)
+        last_err = (r.stderr or '')[:300]
+        if i < attempts - 1:
+            wait = 3 * (2 ** i)
+            print(f'    LFS batch 重试 {i+1}/{attempts-1}（{wait}s 后）')
+            time.sleep(wait)
+    raise SystemExit(f'LFS batch 失败（重试 {attempts} 次）: {last_err}')
+
+
+def lfs_upload(repo: str, path: str, use_cache: bool = True) -> tuple:
+    """把单个文件按 Git LFS 协议上传，返回 (oid, size)。
+
+    带本地缓存：已成功上传过的文件直接复用 oid，不再联网。
+    github.com 在本网络不稳，这一步能省掉绝大部分重试成本。
+    """
+    raw = Path(path).read_bytes()
+    oid = __import__('hashlib').sha256(raw).hexdigest()
+    size = len(raw)
+
+    if use_cache:
+        hit = _load_cache().get(path)
+        if hit and hit.get('oid') == oid and hit.get('size') == size:
+            print('    (缓存命中，跳过上传)')
+            return oid, size
+
+    resp = _lfs_batch(repo, [{'oid': oid, 'size': size}])
+    obj = (resp.get('objects') or [{}])[0]
+    actions = obj.get('actions') or {}
+    upload = actions.get('upload')
+
+    if upload:
+        # upload.href 是预签名的对象存储地址，不需要再附 token，
+        # 只需要服务端在 batch 响应里给出的 header（通常是 Content-Type）。
+        import urllib.request
+
+        req = urllib.request.Request(upload['href'], data=raw, method='PUT')
+        for k, v in (upload.get('header') or {}).items():
+            req.add_header(k, v)
+        if not (upload.get('header') or {}):
+            req.add_header('Content-Type', 'application/octet-stream')
+        with urllib.request.urlopen(req, timeout=600) as r:
+            if r.status not in (200, 201, 204):
+                raise SystemExit(f'LFS PUT 失败 {path}: HTTP {r.status}')
+
+    if use_cache:
+        cache = _load_cache()
+        cache[path] = {'oid': oid, 'size': size}
+        _save_cache(cache)
+
+    # 验证（部分服务端要求）
+    verify = actions.get('verify')
+    if verify:
+        import urllib.request
+
+        body = json.dumps({'oid': oid, 'size': size}).encode()
+        req = urllib.request.Request(verify['href'], data=body, method='POST')
+        for k, v in (verify.get('header') or {}).items():
+            req.add_header(k, v)
+        try:
+            urllib.request.urlopen(req, timeout=120)
+        except Exception:
+            pass
+
+    return oid, size
+
+
+def _lfs_pointer(oid: str, size: int) -> bytes:
+    """LFS 指针文件的字节内容。git checkout 时由 smudge filter 替换为真身。"""
+    return (b'version https://git-lfs.github.com/spec/v1\n'
+            b'oid sha256:' + oid.encode() + b'\n'
+            b'size ' + str(size).encode() + b'\n')
+
+
 def git(*args: str) -> str:
-    r = subprocess.run(['git', *args], capture_output=True, text=True, check=False)
+    """执行 git 命令并返回 stdout。
+
+    必须显式指定 encoding='utf-8'：
+    Windows 默认按 GBK 解码，提交信息里一有中文/emoji 就抛
+    UnicodeDecodeError，`r.stdout` 变成 None，
+    后续 `git log -1 --pretty=%B` 拿到 None，
+    在 commit 那步静默失败——排查了很久才发现是这个。
+    """
+    r = subprocess.run(['git', *args], capture_output=True, text=True,
+                       encoding='utf-8', errors='replace', check=False)
     if r.returncode != 0:
-        raise SystemExit(f'git {" ".join(args)} 失败: {r.stderr[:300]}')
-    return r.stdout.strip()
+        raise SystemExit(f'git {" ".join(args)} 失败: {(r.stderr or "")[:300]}')
+    return (r.stdout or '').strip()
 
 
 def _files_to_sync(remote_sha: str, local_head: str) -> list[list[str]]:
@@ -120,7 +247,25 @@ def main() -> None:
         f = Path(path)
         if not f.exists():
             continue
-        if f.stat().st_size > MAX_FILE or path.endswith(SKIP_LARGE_MARKERS):
+
+        # LFS 文件：走 LFS 协议上传，tree 里用 LFS oid 作 blob sha
+        if path.endswith(LFS_MARKERS):
+            if args.dry_run:
+                entries.append({'path': path, 'mode': '100644', 'type': 'blob',
+                                'sha': 'DRYRUN-LFS'})
+                continue
+            oid, size = lfs_upload(OWNER_REPO, path)
+            # 提交的是指针文本（普通 blob），不是 LFS oid。
+            # trees API 只认已存在的 git 对象，传 oid 会 422。
+            ptr = base64.b64encode(_lfs_pointer(oid, size)).decode()
+            pblob = gh_api('POST', f'repos/{OWNER_REPO}/git/blobs',
+                           {'content': ptr, 'encoding': 'base64'})
+            entries.append({'path': path, 'mode': '100644', 'type': 'blob',
+                            'sha': pblob['sha']})
+            print(f'  lfs  {path}  ({size/1048576:.1f} MB)')
+            continue
+
+        if f.stat().st_size > MAX_FILE:
             skipped.append((path, f.stat().st_size))
             continue
         if args.dry_run:

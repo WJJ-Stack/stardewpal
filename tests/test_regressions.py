@@ -1,34 +1,34 @@
-"""回归测试：真实模型评测中发现的问题，必须钉死。
+﻿"""回归测试：真实模型评测中发现的问题，必须钉死。
 
 每个测试对应一次真实失败，注释里写明现象与根因。
 """
 from __future__ import annotations
 
-from backend.app.agent import _is_relevant, _mentions_other_domain
-from backend.app.retrieval import Retrieved, extract_entities
+from backend.app.agent import OTHER_DOMAIN, _mentions_other_domain
+from backend.app.retrieval import extract_entities
 from backend.pipeline.eval_set import _has_invented_number, score_answer
 
 
-def _chunk(title: str, text: str = '', score: float = 0.02) -> Retrieved:
-    return Retrieved(chunk_id=1, title=title, section=None, text=text or title,
-                     score=score, kind='text', sources=['bm25'])
-
-
 class TestSingleCharEntity:
-    """现象：问「蒜要几天才能成熟」被门控拒绝，答「本知识库只覆盖星露谷」。
+    """现象：问「蒜要几天才能成熟」检索不到《蒜》。
 
-    根因：单字实体（蒜）在标题精确匹配环节被跳过。
+    根因：单字实体（蒜）在实体提取环节被当成噪声滤掉。
+    现在 extract_entities 保留单字实词（另设 SINGLE_CHAR_NOISE 过滤「成熟」这类碎片），
+    BM25 查询也因此能带上「蒜」。
     """
 
-    def test_single_char_entity_exact_title(self):
-        assert _is_relevant('蒜要几天才能成熟？', _chunk('蒜'))
+    def test_single_char_entity_extracted(self):
+        assert '蒜' in extract_entities('蒜要几天才能成熟？')
 
-    def test_single_char_entity_in_longer_title(self):
-        # 「蒜」出现在「蒜油」里 —— 也应允许（否则单字物品永远检索不到）
-        assert _is_relevant('蒜要几天成熟？', _chunk('蒜油'))
+    def test_single_char_noise_filtered(self):
+        """动词/副词碎片不该被当成实体。"""
+        ents = extract_entities('蒜要几天才能成熟')
+        assert '熟' not in ents
+        assert '成' not in ents
 
-    def test_single_char_still_blocks_other_domain(self):
-        assert not _mentions_other_domain('蒜要几天成熟？')  # 不是跨域词
+    def test_single_char_still_not_other_domain(self):
+        assert not _mentions_other_domain('蒜要几天成熟？')
+
 
 
 class TestRefusalScoring:
@@ -75,10 +75,11 @@ class TestCrossDomainBlocking:
         for q in ('防风草卖多少钱', '杨桃要几天成熟', '蒜怎么获得'):
             assert not _mentions_other_domain(q), q
 
-    def test_cross_domain_chunk_rejected(self):
-        # 库里确实有「胡桃木茶几」，但不能因为字面命中就当成相关
-        assert not _is_relevant('原神里胡桃的元素爆发倍率是多少',
-                                _chunk('胡桃木茶几'))
+    def test_cross_domain_word_registered(self):
+        """库里确实有「胡桃木茶几」，所以「胡桃」必须登记为跨域词，
+        否则字面命中会被当成星露谷内容。"""
+        assert '胡桃' in OTHER_DOMAIN
+        assert '钻石镐' in OTHER_DOMAIN
 
 
 class TestEntityExtraction:

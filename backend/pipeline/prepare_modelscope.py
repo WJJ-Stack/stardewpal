@@ -20,7 +20,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-DEFAULT_OUT = ROOT.parent / 'ms-push'
+# 暂存目录放在仓库内（.archive 已 gitignore）。
+# 不放仓库外是为了避免清理时需要跨工作区递归删除。
+DEFAULT_OUT = ROOT / '.archive' / 'ms-push'
 
 # 部署必需的顶层条目
 INCLUDE_DIRS = ['backend', 'frontend', 'scripts']
@@ -36,6 +38,9 @@ EXCLUDE_PATTERNS = [
     'data/eval',
     '*.db-wal',
     '*.db-shm',
+    # 原始 wikitext（7.7MB）只在离线重跑清洗时用得到，
+    # 运行时建索引只读 pages.jsonl。不传给线上，省带宽和构建时间。
+    'wikitext.jsonl',
 ]
 
 

@@ -1,6 +1,8 @@
-"""FastAPI 应用：对话、截图问答、检索调试、评测端点。"""
+﻿"""FastAPI 应用：对话、截图问答、检索调试、评测端点。"""
 from __future__ import annotations
 
+import base64
+import io
 import json
 import time
 from collections import defaultdict, deque
@@ -55,10 +57,19 @@ def _rate_limit(request: Request) -> None:
 
 # ---------------------------------------------------------------- 模型
 
+class ChatTurn(BaseModel):
+    """一问一答。用于多轮上下文。"""
+    question: str = Field(default='', max_length=500)
+    answer: str = Field(default='', max_length=4000)
+
+
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=500)
     top_k: int = Field(default=6, ge=1, le=12)
     stream: bool = False
+    # 多轮上下文：前端把最近几轮问答带上。
+    # 没有这个字段时，像「这题该怎么选」这种省略主语的追问必然失败。
+    history: list[ChatTurn] = Field(default_factory=list, max_length=10)
 
 
 class SearchRequest(BaseModel):
@@ -73,11 +84,14 @@ async def health() -> dict[str, Any]:
     s = store()
     st = s.stats()
     emb_ready = get_embedder().ready
+    llm = get_llm()
     return {
         'status': 'ok' if st['docs'] > 0 else 'empty_index',
         'index': st,
         'embedder_ready': emb_ready,
-        'llm_live': get_llm().live,
+        'llm_live': llm.live,
+        'vlm_live': llm.vlm_live,
+        'vlm_model': llm.vlm_model if llm.vlm_live else 'mock',
         'ocr': get_vision().ocr.available,
         'sqlite_vec': s.has_vec(),
     }
@@ -88,12 +102,17 @@ async def meta() -> dict[str, Any]:
     st = store().stats()
     raw_stats = settings.raw_dir / 'crawl_stats.json'
     crawl = json.loads(raw_stats.read_text(encoding='utf-8')) if raw_stats.exists() else {}
+    llm = get_llm()
     return {
         'project': 'StardewPal',
         'corpus': {'source': 'BWiki 星露谷物语（CC BY-NC-SA）', **crawl, **st},
-        'models': {'embedding': 'bge-small-zh-v1.5 (ONNX INT8, 512d)',
-                   'llm': settings.llm_model if get_llm().live else 'mock',
-                   'vlm': settings.vlm_model if get_llm().live else 'mock'},
+        'models': {
+            'embedding': 'bge-small-zh-v1.5 (ONNX INT8, 512d)',
+            'llm': llm.model if llm.live else 'mock',
+            'llm_provider': llm.provider,
+            'vlm': llm.vlm_model if llm.vlm_live else 'mock',
+            'vlm_provider': llm.vlm_provider,
+        },
         'notice': '本作品仅用于学习与技术展示，非商用。内容版权归 BWiki 及原作者所有。',
     }
 
@@ -118,9 +137,11 @@ async def search(req: SearchRequest, request: Request) -> dict[str, Any]:
 @app.post('/api/ask')
 async def ask(req: AskRequest, request: Request) -> dict[str, Any]:
     _rate_limit(request)
-    agent = Agent(store())
     t0 = time.time()
-    result = await agent.run(req.question, top_k=req.top_k)
+
+    agent = Agent(store())
+    result = await agent.run(req.question, top_k=req.top_k,
+                             history=[h.model_dump() for h in req.history])
     return {
         'question': req.question,
         'answer': result.answer,
@@ -191,12 +212,11 @@ def _sse(event: str, data: dict) -> str:
 async def vision_analyze(
     request: Request,
     file: Annotated[UploadFile, File()],
-    use_vlm: Annotated[bool, Form()] = True,
 ) -> dict[str, Any]:
     _rate_limit(request)
     data = await _read_image(file)
     t0 = time.time()
-    res = await get_vision().analyze(data, use_vlm=use_vlm)
+    res = get_vision().analyze(data)
     return {'result': res.as_dict(), 'trace': res.trace,
             'elapsed_ms': int((time.time() - t0) * 1000)}
 
@@ -207,25 +227,87 @@ async def vision_ask(
     file: Annotated[UploadFile, File()],
     question: Annotated[str, Form()] = '',
     use_vlm: Annotated[bool, Form()] = True,
+    history_json: Annotated[str, Form()] = '',
 ) -> dict[str, Any]:
+    """截图问答：图片直接交给 VLM 回答。
+
+    设计演进见 backend/app/vision/pipeline.py 的模块注释。
+    核心结论：**少即是多**。OCR 文字、裁剪图、复杂提示词都会降低效果。
+    """
     _rate_limit(request)
     data = await _read_image(file)
     t0 = time.time()
-    vision = await get_vision().analyze(data, question=question, use_vlm=use_vlm)
+
+    # 多轮上下文：前端以 JSON 字符串传，避免 multipart 嵌套数组的兼容问题
+    history_dicts: list[dict[str, str]] = []
+    if history_json:
+        try:
+            raw = json.loads(history_json)
+            if isinstance(raw, list):
+                history_dicts = [
+                    {'question': str(x.get('question', ''))[:500],
+                     'answer': str(x.get('answer', ''))[:4000]}
+                    for x in raw[-8:] if isinstance(x, dict)
+                ]
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # 图片**直接交给多模态模型**，不做 OCR → 文字描述 的转述。
+    # 每转述一道就丢一层信息：实测转述会把沙漠节认成夜市，
+    # 然后检索也跟着错，整条链路全歪。
+    b64 = _to_png_b64(data)
+
     agent = Agent(store())
-    q = question.strip() or _default_question(vision.as_dict())
-    result = await agent.run(q, vision_ctx=vision.as_dict())
+    result = await agent.run(question or '这张截图里是什么？',
+                             top_k=settings.top_k_final,
+                             history=history_dicts,
+                             image_b64=b64)
+
+    answer = result.answer
+    citations = result.citations
+    calc = result.calc
+    mocked = result.mocked
+    trace = result.trace
+    retrieved = [c['title'] for c in citations]
+    vision = get_vision().analyze(data)   # 仅用于面板展示，不参与回答
+    vision.trace = []
+    vision.vlm_answer = answer
     return {
-        'question': q,
+        'question': question,
         'vision': vision.as_dict(),
         'vision_trace': vision.trace,
-        'answer': result.answer,
-        'citations': result.citations,
-        'calc': result.calc,
-        'trace': result.trace,
-        'mocked': result.mocked or vision.mocked,
+        'answer': answer,
+        'citations': citations,
+        'calc': calc,
+        'trace': trace,
+        'retrieved': retrieved,
+        'mocked': mocked,
         'elapsed_ms': int((time.time() - t0) * 1000),
     }
+
+
+# ---------------------------------------------------------------- 截图问答辅助
+
+def _to_png_b64(image_bytes: bytes) -> str:
+    """把上传图片转成 base64 PNG，直接喂给多模态模型。
+
+    只做尺寸控制，不做任何内容加工 —— 任何"预处理"都会丢信息。
+    """
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(image_bytes))
+    img.load()
+    if img.mode not in ('RGB', 'RGBA'):
+        img = img.convert('RGB')
+    if max(img.size) > 1400:
+        r = 1400 / max(img.size)
+        img = img.resize((int(img.width * r), int(img.height * r)), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.convert('RGB').save(buf, format='PNG', optimize=True)
+    if buf.tell() > 1400 * 1024:
+        buf = io.BytesIO()
+        img.convert('RGB').save(buf, format='JPEG', quality=88, optimize=True)
+    return base64.b64encode(buf.getvalue()).decode()
 
 
 async def _read_image(file: UploadFile) -> bytes:
@@ -235,14 +317,6 @@ async def _read_image(file: UploadFile) -> bytes:
     if len(data) > settings.max_image_mb * 1024 * 1024:
         raise HTTPException(413, f'图片超过 {settings.max_image_mb}MB 限制')
     return data
-
-
-def _default_question(v: dict[str, Any]) -> str:
-    if v.get('items'):
-        return f"这是{v['items'][0].get('name', '什么物品')}吗？它有什么用、值多少钱？"
-    if v.get('entities'):
-        return f"{v['entities'][0]}的相关信息"
-    return '请解释截图中的内容'
 
 
 # ---------------------------------------------------------------- 错误处理

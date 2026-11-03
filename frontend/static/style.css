@@ -146,31 +146,84 @@ html, body {
   border-top: 1px solid var(--line);
   padding: 12px 16px 14px;
   background: var(--panel);
+  transition: background .15s, box-shadow .15s;
 }
 
-.preview {
-  position: relative;
-  display: inline-block;
-  margin-bottom: 10px;
+.composer.dragover {
+  background: rgba(233, 185, 73, .08);
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
-.preview img {
-  max-height: 120px;
-  max-width: 240px;
-  border-radius: 8px;
+
+/* 截图预览卡片
+   必须显式写 [hidden]，否则下面的 display:flex 会覆盖 hidden 属性，
+   空预览框（内含无 src 的 <img>）会一直显示成破损图标 + alt 文字。 */
+.preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  padding: 6px 10px 6px 6px;
   border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  max-width: 340px;
+}
+.preview[hidden] { display: none; }
+
+.preview .thumb {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 7px;
+  overflow: hidden;
+  background: #16110d;
+  border: 1px solid var(--line);
+}
+.preview .thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
   display: block;
 }
+
+.preview .meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.preview .name {
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.preview .size {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
 .preview .remove {
-  position: absolute;
-  top: -8px; right: -8px;
-  width: 22px; height: 22px;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
-  border: none;
-  background: var(--danger);
-  color: #fff;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
   cursor: pointer;
-  font-size: 15px;
+  font-size: 17px;
   line-height: 1;
+  display: grid;
+  place-items: center;
+  transition: background .15s, color .15s;
+}
+.preview .remove:hover {
+  background: rgba(217, 115, 106, .16);
+  color: var(--danger);
 }
 
 .input-row { display: flex; align-items: flex-end; gap: 10px; }
@@ -182,12 +235,12 @@ html, body {
   border-radius: 10px;
   border: 1px solid var(--line);
   background: var(--panel-2);
+  color: var(--text-dim);
   cursor: pointer;
-  font-size: 18px;
   flex-shrink: 0;
-  transition: border-color .15s;
+  transition: border-color .15s, color .15s;
 }
-.upload:hover { border-color: var(--accent); }
+.upload:hover { border-color: var(--accent); color: var(--accent); }
 
 textarea {
   flex: 1;
@@ -212,10 +265,11 @@ textarea:focus { border-color: var(--accent); }
   font-weight: 600;
   cursor: pointer;
   flex-shrink: 0;
-  transition: filter .15s;
+  height: 40px;
+  transition: filter .15s, opacity .15s;
 }
 .send:hover:not(:disabled) { filter: brightness(1.08); }
-.send:disabled { opacity: .5; cursor: not-allowed; }
+.send:disabled { opacity: .38; cursor: default; }
 
 .quick {
   display: flex;
@@ -231,9 +285,13 @@ textarea:focus { border-color: var(--accent); }
   color: var(--text-dim);
   font-size: 12.5px;
   cursor: pointer;
-  transition: all .15s;
+  transition: color .15s, border-color .15s, background .15s;
 }
-.quick button:hover { color: var(--accent); border-color: var(--accent); }
+.quick button:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(233, 185, 73, .06);
+}
 
 /* ---------------- 侧栏 ---------------- */
 .side-panel {
@@ -302,6 +360,21 @@ textarea:focus { border-color: var(--accent); }
   min-width: 76px;
 }
 .trace-step .detail { flex: 1; word-break: break-word; }
+
+/* 视觉面板里的 OCR 原文 */
+.ocr-texts {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: #1a1310;
+  border: 1px solid var(--line);
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+.ocr-texts > div + div { margin-top: 2px; }
 
 .cite-item {
   font-size: 13px;

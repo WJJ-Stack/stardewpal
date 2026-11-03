@@ -1,4 +1,4 @@
-"""LLM 客户端：OpenAI 兼容协议，支持 Qwen / 任意兼容服务，无 key 时自动 mock。
+﻿"""LLM 客户端：OpenAI 兼容协议，支持 Qwen / 任意兼容服务，无 key 时自动 mock。
 
 设计取舍
 --------
@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 
-from backend.app.config import resolve_provider, settings
+from backend.app.config import resolve_provider, resolve_vision, settings
 
 
 @dataclass
@@ -47,20 +47,33 @@ class LLMClient:
         self.base_url = cfg['base_url']
         self.api_key = cfg['api_key']
         self.model = cfg['model']
-        self.vlm_model = cfg['vlm_model']
         self.timeout = settings.llm_timeout
+
+        # 视觉模型独立配置（可能用不同服务商）
+        vcfg = resolve_vision()
+        self.vlm_provider = vcfg['name']
+        self.vlm_base_url = vcfg['base_url']
+        self.vlm_api_key = vcfg['api_key']
+        self.vlm_model = vcfg['model']
 
     @property
     def live(self) -> bool:
         return bool(self.api_key) and self.provider != 'mock'
 
+    @property
+    def vlm_live(self) -> bool:
+        return bool(self.vlm_api_key) and self.vlm_provider != 'mock'
+
     def describe(self) -> dict[str, Any]:
         return {
             'provider': self.provider,
             'model': self.model if self.live else 'mock',
-            'vlm_model': self.vlm_model if self.live else 'mock',
+            'vlm_provider': self.vlm_provider,
+            'vlm_model': self.vlm_model if self.vlm_live else 'mock',
             'live': self.live,
+            'vlm_live': self.vlm_live,
             'base_url': self.base_url if self.live else '',
+            'vlm_base_url': self.vlm_base_url if self.vlm_live else '',
         }
 
     # ---------------------------------------------------------------- chat
@@ -70,10 +83,35 @@ class LLMClient:
                    max_tokens: int = 1400,
                    tools: list[dict] | None = None,
                    tool_choice: str | None = None) -> LLMResult:
+        # 消息里含图片时，必须走视觉模型（不同的 base_url / key / model）。
+        # 这条分支让「图片直接进 messages」成为可能，不再需要 OCR 转述。
+        has_image = any(
+            isinstance(m.get('content'), list)
+            and any(isinstance(p, dict) and p.get('type') == 'image_url'
+                    for p in m['content'])
+            for m in messages if isinstance(m, dict)
+        )
+        if has_image:
+            if not self.vlm_live:
+                return _mock_chat(messages, tools)
+            payload: dict[str, Any] = {
+                'model': model or self.vlm_model,
+                'messages': messages,
+                'temperature': temperature,
+                'max_tokens': max_tokens,
+            }
+            if tools:
+                payload['tools'] = tools
+                if tool_choice:
+                    payload['tool_choice'] = tool_choice
+            headers = {'Authorization': f'Bearer {self.vlm_api_key}',
+                       'Content-Type': 'application/json'}
+            return await self._post_chat(payload, headers, self.vlm_base_url)
+
         if not self.live:
             return _mock_chat(messages, tools)
 
-        payload: dict[str, Any] = {
+        payload = {
             'model': model or self.model,
             'messages': messages,
             'temperature': temperature,
@@ -108,6 +146,31 @@ class LLMClient:
                 if attempt == settings.llm_max_retries - 1:
                     break
         raise LLMError(f'LLM 调用失败：{last_err}')
+
+    async def _post_chat(self, payload: dict, headers: dict,
+                         base_url: str) -> LLMResult:
+        """统一的 chat/completions 调用（含重试）。供 chat() 复用。"""
+        last_err = ''
+        for attempt in range(settings.llm_max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    r = await client.post(f'{base_url}/chat/completions',
+                                          json=payload, headers=headers)
+                if r.status_code >= 400:
+                    last_err = f'HTTP {r.status_code}: {r.text[:300]}'
+                    if r.status_code in (401, 403):
+                        raise LLMError(f'鉴权失败：{last_err}')
+                    if r.status_code in (429, 500, 502, 503, 504):
+                        continue
+                    raise LLMError(last_err)
+                return _parse_response(r.json(), payload.get('model', ''))
+            except LLMError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                last_err = str(e)
+                if attempt == settings.llm_max_retries - 1:
+                    break
+        raise LLMError(f'模型调用失败：{last_err}')
 
     # ---------------------------------------------------------------- stream
     async def stream(self, messages: list[dict[str, Any]], *,
@@ -154,19 +217,55 @@ class LLMClient:
     # ---------------------------------------------------------------- vision
     async def vision(self, prompt: str, image_b64: str, *,
                      model: str | None = None,
-                     max_tokens: int = 700) -> LLMResult:
-        messages = [{
+                     max_tokens: int = 700,
+                     system: str | None = None) -> LLMResult:
+        messages: list[dict[str, Any]] = []
+        if system:
+            messages.append({'role': 'system', 'content': system})
+        messages.append({
             'role': 'user',
             'content': [
                 {'type': 'text', 'text': prompt},
                 {'type': 'image_url',
                  'image_url': {'url': f'data:image/png;base64,{image_b64}'}},
             ],
-        }]
-        if not self.live:
+        })
+        if not self.vlm_live:
             return _mock_vision(prompt)
-        return await self.chat(messages, model=model or self.vlm_model,
-                               max_tokens=max_tokens, temperature=0.1)
+        return await self._chat_vlm(messages, model or self.vlm_model, max_tokens)
+
+    async def _chat_vlm(self, messages: list[dict[str, Any]], model: str,
+                        max_tokens: int) -> LLMResult:
+        """调用视觉模型（独立的 base_url / key / model）。"""
+        payload = {
+            'model': model,
+            'messages': messages,
+            'temperature': 0.1,
+            'max_tokens': max_tokens,
+        }
+        headers = {'Authorization': f'Bearer {self.vlm_api_key}',
+                   'Content-Type': 'application/json'}
+        last_err = ''
+        for attempt in range(settings.llm_max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    r = await client.post(f'{self.vlm_base_url}/chat/completions',
+                                          json=payload, headers=headers)
+                if r.status_code >= 400:
+                    last_err = f'HTTP {r.status_code}: {r.text[:300]}'
+                    if r.status_code in (401, 403):
+                        raise LLMError(f'视觉模型鉴权失败：{last_err}')
+                    if r.status_code in (429, 500, 502, 503, 504):
+                        continue
+                    raise LLMError(last_err)
+                return _parse_response(r.json(), model)
+            except LLMError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                last_err = str(e)
+                if attempt == settings.llm_max_retries - 1:
+                    break
+        raise LLMError(f'视觉模型调用失败：{last_err}')
 
 
 def _parse_response(data: dict, model: str) -> LLMResult:
